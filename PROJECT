@@ -8,4 +8,23 @@ layout:
 - go.kubebuilder.io/v4
 projectName: cluster-api-provider-verda
 repo: github.com/cprivitere/cluster-api-provider-verda
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: cluster.x-k8s.io
+  group: infrastructure
+  kind: VerdaCluster
+  path: github.com/cprivitere/cluster-api-provider-verda/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: cluster.x-k8s.io
+  group: infrastructure
+  kind: VerdaMachine
+  path: github.com/cprivitere/cluster-api-provider-verda/api/v1alpha1
+  version: v1alpha1
 version: "3"

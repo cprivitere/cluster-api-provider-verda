@@ -18,3 +18,14 @@ resources:
 - metrics_auth_role.yaml
 - metrics_auth_role_binding.yaml
 - metrics_reader_role.yaml
+# For each CRD, "Admin", "Editor" and "Viewer" roles are scaffolded by
+# default, aiding admins in cluster management. Those roles are
+# not used by the cluster-api-provider-verda itself. You can comment the following lines
+# if you do not want those helpers be installed with your Project.
+- verdamachine_admin_role.yaml
+- verdamachine_editor_role.yaml
+- verdamachine_viewer_role.yaml
+- verdacluster_admin_role.yaml
+- verdacluster_editor_role.yaml
+- verdacluster_viewer_role.yaml
+
