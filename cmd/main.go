@@ -210,6 +210,9 @@ func main() {
 	// manager client is sufficient — a production refinement.
 	clusterCache, err := clustercache.SetupWithManager(ctx, mgr, clustercache.Options{
 		SecretClient: mgr.GetClient(),
+		// UserAgent is required by clustercache validation; it
+		// identifies this provider's clients on workload clusters.
+		Client: clustercache.ClientOptions{UserAgent: "cluster-api-provider-verda"},
 	}, runtimecontroller.Options{})
 	if err != nil {
 		setupLog.Error(err, "Failed to create cluster cache")
