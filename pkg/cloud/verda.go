@@ -93,8 +93,16 @@ func (c *verdaClient) FindInstancesByTags(ctx context.Context, tags map[string]s
 	return c.sdk.Instances.List(ctx, &verda.ListInstancesOptions{Tags: TagFilters(tags)})
 }
 
+// The delete action's volume semantics, verified against Verda's
+// Terraform provider (deleteVolumePolicy in resource_instance.go)
+// after enumerated volume lists failed live with "Volume ID doesn't
+// exist": a nil volume list keeps the API default — the OS volume is
+// deleted or trashed according to deletePermanently, and data
+// volumes are detached; an empty (non-nil) list deletes no volume
+// at all. The OS volume is governed by the flag, never by naming it
+// in the list.
 func (c *verdaClient) DeleteInstance(ctx context.Context, id string) error {
-	return c.sdk.Instances.Delete(ctx, []string{id}, nil, true)
+	return c.sdk.Instances.Delete(ctx, []string{id}, []string{}, false)
 }
 
 func (c *verdaClient) DeleteInstanceWithVolumes(ctx context.Context, id string) error {
@@ -105,30 +113,28 @@ func (c *verdaClient) DeleteInstanceWithVolumes(ctx context.Context, id string) 
 	if err != nil {
 		return err
 	}
-	volumeIDs := make([]string, 0, len(inst.VolumeIDs)+1)
-	if inst.OSVolumeID != nil && *inst.OSVolumeID != "" {
-		volumeIDs = append(volumeIDs, *inst.OSVolumeID)
+	// Data volumes attached to the instance, for the sweep below.
+	// The OS volume is deliberately not in this list: the delete
+	// action handles it through deletePermanently.
+	dataVolumeIDs := make([]string, 0, len(inst.VolumeIDs))
+	for _, volumeID := range inst.VolumeIDs {
+		if inst.OSVolumeID == nil || volumeID != *inst.OSVolumeID {
+			dataVolumeIDs = append(dataVolumeIDs, volumeID)
+		}
 	}
-	volumeIDs = append(volumeIDs, inst.VolumeIDs...)
 
-	// Delete the instance together with its volumes.
-	err = c.sdk.Instances.Delete(ctx, []string{id}, volumeIDs, true)
-	if err == nil {
-		return nil
+	// Delete the instance: with a nil volume list the API deletes
+	// the OS volume permanently and detaches the data volumes.
+	if err := c.sdk.Instances.Delete(ctx, []string{id}, nil, true); err != nil {
+		// Verify the end state before believing the failure: if
+		// the instance is still there, the error is real.
+		if _, getErr := c.GetInstance(ctx, id); !errors.Is(getErr, ErrNotFound) {
+			return err
+		}
 	}
-	// The combined call races the platform's own teardown: deleting
-	// the instance retires its OS volume platform-side, so the
-	// explicit volume list can 404 ("Volume ID doesn't exist") even
-	// though the deletion is proceeding — observed live Nov 26,
-	// 2026. Verify the end state instead of trusting the call: if
-	// the instance is gone, sweep any surviving volumes individually
-	// and tolerate the ones the platform already took. If the
-	// instance is still there, the failure is real and the caller
-	// should see it.
-	if _, getErr := c.GetInstance(ctx, id); !errors.Is(getErr, ErrNotFound) {
-		return err
-	}
-	for _, volumeID := range volumeIDs {
+	// Sweep the now-detached data volumes, tolerating ones that are
+	// already gone.
+	for _, volumeID := range dataVolumeIDs {
 		if volErr := c.sdk.Volumes.DeleteVolume(ctx, volumeID, true); volErr != nil && !isNotFoundError(volErr) {
 			return fmt.Errorf("deleting volume %s: %w", volumeID, volErr)
 		}
