@@ -15,6 +15,7 @@ rules:
 - apiGroups:
   - cluster.x-k8s.io
   resources:
+  - clusters
   - machines
   verbs:
   - get

@@ -39,6 +39,7 @@ func reconcileTestMachine() *infrastructurev1alpha1.VerdaMachine {
 		Spec: infrastructurev1alpha1.VerdaMachineSpec{
 			InstanceType: "CPU.4V.16G",
 			Image:        "26.04.cuda13.4",
+			Location:     "FIN-01",
 			SSHKeyIDs:    []string{"key-1"},
 		},
 	}

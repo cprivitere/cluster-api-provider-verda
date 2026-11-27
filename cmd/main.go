@@ -29,7 +29,9 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+	"sigs.k8s.io/cluster-api/controllers/clustercache"
 	ctrl "sigs.k8s.io/controller-runtime"
+	runtimecontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -191,6 +193,23 @@ func main() {
 		os.Exit(1)
 	}
 
+	ctx := ctrl.SetupSignalHandler()
+
+	// The ClusterCache gives the machine controller clients for
+	// workload clusters, so it can finish node initialization there
+	// (providerID + the uninitialized taint — decision 13).
+	// SecretClient: the manager's client reads kubeconfig secrets
+	// directly. Core Cluster API builds a dedicated client that
+	// caches only kubeconfig secrets; at this provider's scale the
+	// manager client is sufficient — a production refinement.
+	clusterCache, err := clustercache.SetupWithManager(ctx, mgr, clustercache.Options{
+		SecretClient: mgr.GetClient(),
+	}, runtimecontroller.Options{})
+	if err != nil {
+		setupLog.Error(err, "Failed to create cluster cache")
+		os.Exit(1)
+	}
+
 	if err := (&controller.VerdaClusterReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
@@ -200,9 +219,10 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.VerdaMachineReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Cloud:  cloudClient,
+		Client:       mgr.GetClient(),
+		Scheme:       mgr.GetScheme(),
+		Cloud:        cloudClient,
+		ClusterCache: clusterCache,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "verdamachine")
 		os.Exit(1)
@@ -219,7 +239,7 @@ func main() {
 	}
 
 	setupLog.Info("Starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}

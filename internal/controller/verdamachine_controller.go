@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+	"sigs.k8s.io/cluster-api/controllers/clustercache"
 	"sigs.k8s.io/cluster-api/util"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -69,12 +70,19 @@ type VerdaMachineReconciler struct {
 	// Cloud is the Verda Cloud client. It is injected by main; tests
 	// substitute cloud.NewFakeClient().
 	Cloud cloud.Client
+
+	// ClusterCache provides clients for workload clusters, used to
+	// finish node initialization there (see reconcileNode). Nil
+	// disables the node step — standalone use has no workload
+	// cluster to talk to.
+	ClusterCache clustercache.ClusterCache
 }
 
 // +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=verdamachines,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=verdamachines/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=verdamachines/finalizers,verbs=update
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machines,verbs=get;list;watch
+// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
 func (r *VerdaMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -177,6 +185,22 @@ func (r *VerdaMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		// is still coming up.
 		log.Info("Instance is not ready yet", "instanceID", inst.ID, "status", inst.Status)
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+	}
+	if machine.Status.Ready && r.ClusterCache != nil {
+		done, err := r.reconcileNode(ctx, machine, inst)
+		if err != nil {
+			// The workload cluster may simply not be reachable
+			// yet — its API server is still coming up while KCP
+			// initializes the control plane. That is a wait, not
+			// a machine failure: log it and poll.
+			log.Info("Node step is waiting on the workload cluster", "error", err.Error())
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		if !done {
+			// The node has not registered yet; kubeadm is still
+			// joining. Poll until it appears.
+			return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+		}
 	}
 	if machine.Status.Ready && machine.Spec.IsSpot {
 		// A spot instance can be discontinued underneath a Ready
@@ -298,6 +322,98 @@ func (r *VerdaMachineReconciler) bootstrapScript(ctx context.Context, machine *i
 		return "", fmt.Errorf("translating bootstrap data: %w", err)
 	}
 	return script, nil
+}
+
+// uninitializedTaintKey is the taint kubelet applies to a node that
+// registered with an external cloud provider before any cloud
+// controller has initialized it (k8s.io/cloud-provider's
+// TaintExternalCloudProvider). With no Verda CCM, this provider
+// clears it — the same job the reference Docker provider does.
+const uninitializedTaintKey = "node.cloudprovider.kubernetes.io/uninitialized"
+
+// reconcileNode finishes node initialization in the workload
+// cluster (decision 13): once the instance's node has registered,
+// set the node's providerID to this machine's and clear the
+// uninitialized taint, so core Cluster API can correlate the
+// Machine with its Node. The node is matched by address — the
+// instance's public or private IP among the node's IPs — because
+// the node name is the instance hostname, which Verda controls,
+// while the addresses come from the cloud record itself.
+//
+// done=false means "not yet": the node has not registered. Errors
+// are the caller's to soften — a workload cluster that isn't up
+// yet is a wait, not a machine failure.
+func (r *VerdaMachineReconciler) reconcileNode(ctx context.Context, machine *infrastructurev1alpha1.VerdaMachine, inst *verdasdk.Instance) (bool, error) {
+	clusterName := machine.Labels[clusterv1.ClusterNameLabel]
+	if clusterName == "" {
+		// Standalone machine: no workload cluster to patch.
+		return true, nil
+	}
+	workloadClient, err := r.ClusterCache.GetClient(ctx, client.ObjectKey{Namespace: machine.Namespace, Name: clusterName})
+	if err != nil {
+		return false, fmt.Errorf("getting workload cluster client: %w", err)
+	}
+	nodes := &corev1.NodeList{}
+	if err := workloadClient.List(ctx, nodes); err != nil {
+		return false, fmt.Errorf("listing workload cluster nodes: %w", err)
+	}
+	node := findNodeForInstance(nodes, inst)
+	if node == nil {
+		return false, nil
+	}
+	if node.Spec.ProviderID == machine.Spec.ProviderID && !hasTaint(node, uninitializedTaintKey) {
+		return true, nil
+	}
+	base := node.DeepCopy()
+	node.Spec.ProviderID = machine.Spec.ProviderID
+	node.Spec.Taints = removeTaint(node.Spec.Taints, uninitializedTaintKey)
+	if err := workloadClient.Patch(ctx, node, client.MergeFrom(base)); err != nil {
+		return false, fmt.Errorf("patching node %s: %w", node.Name, err)
+	}
+	logf.FromContext(ctx).Info("Set providerID on node", "node", node.Name, "providerID", machine.Spec.ProviderID)
+	return true, nil
+}
+
+// findNodeForInstance returns the node whose internal or external
+// IP is one of the instance's addresses, or nil.
+func findNodeForInstance(nodes *corev1.NodeList, inst *verdasdk.Instance) *corev1.Node {
+	ips := make(map[string]bool)
+	if inst.IP != nil {
+		ips[*inst.IP] = true
+	}
+	if inst.PrivateIP != nil {
+		ips[*inst.PrivateIP] = true
+	}
+	if len(ips) == 0 {
+		return nil
+	}
+	for i := range nodes.Items {
+		for _, addr := range nodes.Items[i].Status.Addresses {
+			if (addr.Type == corev1.NodeInternalIP || addr.Type == corev1.NodeExternalIP) && ips[addr.Address] {
+				return &nodes.Items[i]
+			}
+		}
+	}
+	return nil
+}
+
+func hasTaint(node *corev1.Node, key string) bool {
+	for _, taint := range node.Spec.Taints {
+		if taint.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
+func removeTaint(taints []corev1.Taint, key string) []corev1.Taint {
+	kept := make([]corev1.Taint, 0, len(taints))
+	for _, taint := range taints {
+		if taint.Key != key {
+			kept = append(kept, taint)
+		}
+	}
+	return kept
 }
 
 func (r *VerdaMachineReconciler) reconcileDelete(ctx context.Context, machine *infrastructurev1alpha1.VerdaMachine) (ctrl.Result, error) {
