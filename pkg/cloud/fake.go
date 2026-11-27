@@ -35,7 +35,12 @@ type FakeClient struct {
 	mu        sync.Mutex
 	instances map[string]*verda.Instance
 	scripts   map[string]*verda.StartupScript
-	seq       int
+	// inlineScripts records the inline startup script each instance
+	// was created with, keyed by instance ID. The SDK's Instance
+	// type does not echo the script back (only a script ID), so
+	// tests need this side channel to see what was delivered.
+	inlineScripts map[string]string
+	seq           int
 
 	Err error
 }
@@ -45,9 +50,19 @@ var _ Client = (*FakeClient)(nil)
 // NewFakeClient returns an empty FakeClient.
 func NewFakeClient() *FakeClient {
 	return &FakeClient{
-		instances: make(map[string]*verda.Instance),
-		scripts:   make(map[string]*verda.StartupScript),
+		instances:     make(map[string]*verda.Instance),
+		scripts:       make(map[string]*verda.StartupScript),
+		inlineScripts: make(map[string]string),
 	}
+}
+
+// StartupScriptFor returns the inline startup script the instance
+// with the given ID was created with, or "" if it was created
+// without one (or does not exist).
+func (f *FakeClient) StartupScriptFor(id string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.inlineScripts[id]
 }
 
 // SetInstanceStatus overrides a stored instance's status. It exists
@@ -104,6 +119,9 @@ func (f *FakeClient) CreateInstance(_ context.Context, req verda.CreateInstanceR
 		inst.Tags = append(inst.Tags, verda.Tag{Key: t.Key, Value: t.Value})
 	}
 	f.instances[inst.ID] = inst
+	if req.StartupScript != "" {
+		f.inlineScripts[inst.ID] = req.StartupScript
+	}
 	return copyInstance(inst), nil
 }
 

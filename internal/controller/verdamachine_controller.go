@@ -24,18 +24,22 @@ import (
 	"time"
 
 	verdasdk "github.com/verda-cloud/verdacloud-sdk-go/pkg/verda"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+	"sigs.k8s.io/cluster-api/util"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	infrastructurev1alpha1 "github.com/cprivitere/cluster-api-provider-verda/api/v1alpha1"
+	"github.com/cprivitere/cluster-api-provider-verda/pkg/bootstrap"
 	"github.com/cprivitere/cluster-api-provider-verda/pkg/cloud"
 )
 
@@ -70,6 +74,8 @@ type VerdaMachineReconciler struct {
 // +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=verdamachines,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=verdamachines/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=verdamachines/finalizers,verbs=update
+// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machines,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
 func (r *VerdaMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -98,6 +104,14 @@ func (r *VerdaMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	inst, err := r.findOrCreateInstance(ctx, machine)
 	if err != nil {
+		if errors.Is(err, errBootstrapNotReady) {
+			// The owning Machine exists but CABPK has not
+			// delivered its bootstrap data yet. Per the contract
+			// the Machine stays Pending; creating the instance
+			// now would strand a node that can never join.
+			log.Info("Waiting for bootstrap data before creating the instance")
+			return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -164,6 +178,13 @@ func (r *VerdaMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		log.Info("Instance is not ready yet", "instanceID", inst.ID, "status", inst.Status)
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
+	if machine.Status.Ready && machine.Spec.IsSpot {
+		// A spot instance can be discontinued underneath a Ready
+		// machine, and nothing watches the cloud side — poll slowly
+		// so a discontinuation surfaces (the Ready condition going
+		// False) instead of going unnoticed indefinitely.
+		return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -205,14 +226,20 @@ func (r *VerdaMachineReconciler) findOrCreateInstance(ctx context.Context, machi
 		}
 	}
 
+	script, err := r.bootstrapScript(ctx, machine)
+	if err != nil {
+		return nil, err
+	}
+
 	inst, err := r.Cloud.CreateInstance(ctx, verdasdk.CreateInstanceRequest{
-		InstanceType: machine.Spec.InstanceType,
-		Image:        machine.Spec.Image,
-		LocationCode: machine.Spec.Location,
-		SSHKeyIDs:    machine.Spec.SSHKeyIDs,
-		IsSpot:       machine.Spec.IsSpot,
-		Hostname:     machine.Name,
-		Tags:         cloud.MachineTags(clusterNameFor(machine), machine.Namespace+"/"+machine.Name, roleFor(machine)),
+		InstanceType:  machine.Spec.InstanceType,
+		Image:         machine.Spec.Image,
+		LocationCode:  machine.Spec.Location,
+		SSHKeyIDs:     machine.Spec.SSHKeyIDs,
+		IsSpot:        machine.Spec.IsSpot,
+		Hostname:      machine.Name,
+		StartupScript: script,
+		Tags:          cloud.MachineTags(clusterNameFor(machine), machine.Namespace+"/"+machine.Name, roleFor(machine)),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating instance: %w", err)
@@ -222,6 +249,55 @@ func (r *VerdaMachineReconciler) findOrCreateInstance(ctx context.Context, machi
 		return nil, err
 	}
 	return inst, nil
+}
+
+// errBootstrapNotReady marks the create path's wait state: an owner
+// Machine exists but its bootstrap data is not available yet.
+var errBootstrapNotReady = errors.New("bootstrap data is not ready yet")
+
+// bootstrapScript resolves the instance's startup script from the
+// Cluster API bootstrap data of the owning Machine: the Machine's
+// spec.bootstrap.dataSecretName names a Secret whose "value" key
+// holds CABPK's cloud-config, which pkg/bootstrap translates into
+// the bash script Verda's startup mechanism runs.
+//
+// A VerdaMachine with no owner Machine (standalone use) gets no
+// script — bootstrap delivery is a composition feature. An owner
+// whose data is not ready yet yields errBootstrapNotReady: per the
+// contract the Machine stays Pending until CABPK delivers, and
+// creating the instance before that would strand a node that can
+// never join.
+func (r *VerdaMachineReconciler) bootstrapScript(ctx context.Context, machine *infrastructurev1alpha1.VerdaMachine) (string, error) {
+	owner, err := util.GetOwnerMachine(ctx, r.Client, machine.ObjectMeta)
+	if err != nil {
+		return "", fmt.Errorf("getting owner Machine: %w", err)
+	}
+	if owner == nil {
+		return "", nil
+	}
+	if owner.Spec.Bootstrap.DataSecretName == nil {
+		return "", errBootstrapNotReady
+	}
+	secret := &corev1.Secret{}
+	secretKey := types.NamespacedName{Namespace: machine.Namespace, Name: *owner.Spec.Bootstrap.DataSecretName}
+	if err := r.Get(ctx, secretKey, secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", errBootstrapNotReady
+		}
+		return "", fmt.Errorf("getting bootstrap secret: %w", err)
+	}
+	if format := string(secret.Data["format"]); format != "" && format != "cloud-config" {
+		return "", fmt.Errorf("unsupported bootstrap format %q in secret %s", format, secretKey)
+	}
+	data, ok := secret.Data["value"]
+	if !ok {
+		return "", fmt.Errorf("bootstrap secret %s has no \"value\" key", secretKey)
+	}
+	script, err := bootstrap.Translate(data)
+	if err != nil {
+		return "", fmt.Errorf("translating bootstrap data: %w", err)
+	}
+	return script, nil
 }
 
 func (r *VerdaMachineReconciler) reconcileDelete(ctx context.Context, machine *infrastructurev1alpha1.VerdaMachine) (ctrl.Result, error) {
