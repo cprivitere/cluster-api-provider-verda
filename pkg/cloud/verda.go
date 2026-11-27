@@ -93,14 +93,19 @@ func (c *verdaClient) FindInstancesByTags(ctx context.Context, tags map[string]s
 	return c.sdk.Instances.List(ctx, &verda.ListInstancesOptions{Tags: TagFilters(tags)})
 }
 
-// The delete action's volume semantics, verified against Verda's
-// Terraform provider (deleteVolumePolicy in resource_instance.go)
-// after enumerated volume lists failed live with "Volume ID doesn't
-// exist": a nil volume list keeps the API default — the OS volume is
-// deleted or trashed according to deletePermanently, and data
-// volumes are detached; an empty (non-nil) list deletes no volume
-// at all. The OS volume is governed by the flag, never by naming it
-// in the list.
+// The delete action's volume semantics, per the source of record —
+// Verda's OpenAPI spec (https://api.verda.com/v1/openapi.json,
+// PerformInstanceActionPublicDto): volume_ids is "Volume IDs to
+// delete. Specify empty array to indicate no volumes should be
+// deleted", and delete_permanently applies to the volumes being
+// deleted. The SDK's InstanceActionRequest comment spells out the
+// tri-state: nil omits the field (API default: OS volume deleted,
+// rest detached), an empty slice deletes no volume, a slice with
+// IDs deletes those volumes. Verda's Terraform provider
+// (deleteVolumePolicy) implements the same reading and never
+// enumerates the OS volume — naming it in the list failed live with
+// "Volume ID doesn't exist" (Nov 26, 2026). So: the OS volume is
+// governed by the flag and the nil default, never by enumeration.
 func (c *verdaClient) DeleteInstance(ctx context.Context, id string) error {
 	return c.sdk.Instances.Delete(ctx, []string{id}, []string{}, false)
 }
