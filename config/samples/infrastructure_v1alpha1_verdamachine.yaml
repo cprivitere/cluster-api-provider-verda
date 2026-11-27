@@ -13,7 +13,11 @@ spec:
   # The kubernetes-1.37.0 variant of this image exists too; the plain
   # one keeps node setup in the bootstrap script, under our control.
   image: 26.04.cuda13.4
-  # Empty location = the SDK default.
+  # Location is load-bearing: instance families are region-scoped.
+  # The plain CPU.* types exist only in FIN-01; CPU-TURIN.* only in
+  # FIN-03. An empty location silently defaults to FIN-03 in the
+  # SDK, which 503s for CPU.4V.16G — learned live, Nov 26, 2026.
+  location: FIN-01
   sshKeyIDs:
     - 375d1304-285c-442e-8418-386038fdfb93 # cprivitere@scampertonix
     - 2b947249-d106-4b51-b5d7-ede6336020bd # cprivitere@DESKTOP-8635292
