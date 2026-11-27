@@ -4,6 +4,8 @@
 resources:
 - bases/infrastructure.cluster.x-k8s.io_verdaclusters.yaml
 - bases/infrastructure.cluster.x-k8s.io_verdamachines.yaml
+- bases/infrastructure.cluster.x-k8s.io_verdaclustertemplates.yaml
+- bases/infrastructure.cluster.x-k8s.io_verdamachinetemplates.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

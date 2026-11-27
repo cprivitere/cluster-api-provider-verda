@@ -27,4 +27,20 @@ resources:
   kind: VerdaMachine
   path: github.com/cprivitere/cluster-api-provider-verda/api/v1alpha1
   version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: cluster.x-k8s.io
+  group: infrastructure
+  kind: VerdaClusterTemplate
+  path: github.com/cprivitere/cluster-api-provider-verda/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: cluster.x-k8s.io
+  group: infrastructure
+  kind: VerdaMachineTemplate
+  path: github.com/cprivitere/cluster-api-provider-verda/api/v1alpha1
+  version: v1alpha1
 version: "3"
