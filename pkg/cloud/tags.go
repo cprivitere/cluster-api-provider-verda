@@ -17,7 +17,7 @@ limitations under the License.
 package cloud
 
 import (
-	"sort"
+	"slices"
 
 	"github.com/verda-cloud/verdacloud-sdk-go/pkg/verda"
 )
@@ -62,7 +62,7 @@ func TagFilters(tags map[string]string) []verda.TagFilter {
 	for k := range tags {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	filters := make([]verda.TagFilter, 0, len(tags))
 	for _, k := range keys {
 		filters = append(filters, verda.TagFilter{Key: k, Value: tags[k]})

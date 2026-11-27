@@ -30,7 +30,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/cluster-api/controllers/clustercache"
 	"sigs.k8s.io/cluster-api/util"
@@ -132,8 +131,8 @@ func (r *VerdaMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	base := machine.DeepCopy()
 	wasReady := machine.Status.Ready
 	machine.Status.Addresses = addressesOf(inst)
-	machine.Status.Initialization.Provisioned = ptr.To(true)
-	machine.Status.Interruptible = ptr.To(machine.Spec.IsSpot)
+	machine.Status.Initialization.Provisioned = new(true)
+	machine.Status.Interruptible = new(machine.Spec.IsSpot)
 	switch inst.Status {
 	case "running":
 		machine.Status.Ready = true

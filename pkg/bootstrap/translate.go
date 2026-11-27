@@ -45,6 +45,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -131,7 +132,8 @@ func Translate(cloudConfigData []byte) (string, error) {
 		return "", fmt.Errorf("parsing cloud-config: %w", err)
 	}
 	if len(cfg.DiskSetup) > 0 || len(cfg.FSSetup) > 0 {
-		return "", fmt.Errorf("cloud-config contains disk_setup/fs_setup, which have no safe mechanical bash translation; refusing to improvise partitioning")
+		return "", fmt.Errorf("cloud-config contains disk_setup/fs_setup, which have no safe mechanical " +
+			"bash translation; refusing to improvise partitioning")
 	}
 
 	var b strings.Builder
@@ -159,7 +161,7 @@ func Translate(cloudConfigData []byte) (string, error) {
 }
 
 func looksLikeCloudConfig(data []byte) bool {
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -208,7 +210,8 @@ func emitFiles(b *strings.Builder, files []fileEntry) error {
 			}
 		case "base64":
 			delim := heredocDelimiter(i)
-			fmt.Fprintf(b, "base64 -d %s %s <<'%s'\n%s\n%s\n", redirect, shellQuote(f.Path), delim, strings.TrimSpace(f.Content), delim)
+			fmt.Fprintf(b, "base64 -d %s %s <<'%s'\n%s\n%s\n",
+				redirect, shellQuote(f.Path), delim, strings.TrimSpace(f.Content), delim)
 		case "gzip":
 			// The YAML scalar carries raw gzipped bytes; re-encode
 			// them as base64 so the script stays text-safe.
@@ -217,7 +220,8 @@ func emitFiles(b *strings.Builder, files []fileEntry) error {
 			fmt.Fprintf(b, "base64 -d <<'%s' | gunzip -c %s %s\n%s\n%s\n", delim, redirect, shellQuote(f.Path), encoded, delim)
 		case "gzip+base64":
 			delim := heredocDelimiter(i)
-			fmt.Fprintf(b, "base64 -d <<'%s' | gunzip -c %s %s\n%s\n%s\n", delim, redirect, shellQuote(f.Path), strings.TrimSpace(f.Content), delim)
+			fmt.Fprintf(b, "base64 -d <<'%s' | gunzip -c %s %s\n%s\n%s\n",
+				delim, redirect, shellQuote(f.Path), strings.TrimSpace(f.Content), delim)
 		default:
 			return fmt.Errorf("write_files entry %s: unsupported encoding %q", f.Path, f.Encoding)
 		}
@@ -237,13 +241,7 @@ func emitFiles(b *strings.Builder, files []fileEntry) error {
 // colliding with the delimiter) falls back to base64 embedding.
 func emitPlainFile(b *strings.Builder, f fileEntry, redirect string, index int) error {
 	delim := heredocDelimiter(index)
-	containsDelim := false
-	for _, line := range strings.Split(f.Content, "\n") {
-		if line == delim {
-			containsDelim = true
-			break
-		}
-	}
+	containsDelim := slices.Contains(strings.Split(f.Content, "\n"), delim)
 	if !strings.HasSuffix(f.Content, "\n") || containsDelim {
 		encoded := base64.StdEncoding.EncodeToString([]byte(f.Content))
 		fmt.Fprintf(b, "base64 -d %s %s <<'%s'\n%s\n%s\n", redirect, shellQuote(f.Path), delim, encoded, delim)
@@ -287,7 +285,8 @@ func emitUsers(b *strings.Builder, users []userEntry) {
 		if u.Groups != "" {
 			args = append(args, "-G", shellQuote(u.Groups))
 		}
-		fmt.Fprintf(b, "id %s >/dev/null 2>&1 || useradd %s %s\n", shellQuote(u.Name), strings.Join(args, " "), shellQuote(u.Name))
+		fmt.Fprintf(b, "id %s >/dev/null 2>&1 || useradd %s %s\n",
+			shellQuote(u.Name), strings.Join(args, " "), shellQuote(u.Name))
 		if u.Passwd != "" {
 			fmt.Fprintf(b, "usermod -p %s %s\n", shellQuote(u.Passwd), shellQuote(u.Name))
 		}
@@ -325,7 +324,8 @@ func emitNTP(b *strings.Builder, ntp *ntpConfig) {
 	b.WriteString("\n# --- ntp (systemd-timesyncd) ---\n")
 	b.WriteString("mkdir -p /etc/systemd/timesyncd.conf.d\n")
 	delim := "EOF_NTP"
-	fmt.Fprintf(b, "cat > /etc/systemd/timesyncd.conf.d/99-capve.conf <<'%s'\n[Time]\nNTP=%s\n%s\n", delim, strings.Join(ntp.Servers, " "), delim)
+	fmt.Fprintf(b, "cat > /etc/systemd/timesyncd.conf.d/99-capve.conf <<'%s'\n[Time]\nNTP=%s\n%s\n",
+		delim, strings.Join(ntp.Servers, " "), delim)
 	b.WriteString("systemctl restart systemd-timesyncd || true\n")
 }
 

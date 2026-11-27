@@ -26,7 +26,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -59,7 +58,7 @@ func ownedTestMachine() *infrastructurev1alpha1.VerdaMachine {
 	machine.OwnerReferences = []metav1.OwnerReference{{
 		APIVersion: clusterv1.GroupVersion.String(),
 		Kind:       "Machine",
-		Name:       "test-machine",
+		Name:       testMachineName,
 		UID:        types.UID("owner-uid"),
 	}}
 	return machine
@@ -67,7 +66,7 @@ func ownedTestMachine() *infrastructurev1alpha1.VerdaMachine {
 
 func ownerMachine(dataSecretName *string) *clusterv1.Machine {
 	return &clusterv1.Machine{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-machine", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testMachineName, Namespace: testNamespace},
 		Spec: clusterv1.MachineSpec{
 			Bootstrap: clusterv1.Bootstrap{DataSecretName: dataSecretName},
 		},
@@ -80,7 +79,7 @@ func bootstrapSecret(format string) *corev1.Secret {
 		data["format"] = []byte(format)
 	}
 	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-bootstrap", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testBootstrapName, Namespace: testNamespace},
 		Data:       data,
 	}
 }
@@ -118,8 +117,8 @@ func TestBootstrapScriptDeliveredOnCreate(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()
 	r := bootstrapTestReconciler(t, cloudClient,
-		ownedTestMachine(), ownerMachine(ptr.To("test-bootstrap")), bootstrapSecret("cloud-config"))
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-machine", Namespace: "default"}}
+		ownedTestMachine(), ownerMachine(new(testBootstrapName)), bootstrapSecret("cloud-config"))
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testMachineName, Namespace: testNamespace}}
 
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -147,7 +146,7 @@ func TestBootstrapWaitsWhenDataSecretNameNil(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()
 	r := bootstrapTestReconciler(t, cloudClient, ownedTestMachine(), ownerMachine(nil))
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-machine", Namespace: "default"}}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testMachineName, Namespace: testNamespace}}
 
 	result, err := r.Reconcile(ctx, req)
 	if err != nil {
@@ -164,8 +163,8 @@ func TestBootstrapWaitsWhenDataSecretNameNil(t *testing.T) {
 func TestBootstrapWaitsWhenSecretMissing(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()
-	r := bootstrapTestReconciler(t, cloudClient, ownedTestMachine(), ownerMachine(ptr.To("test-bootstrap")))
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-machine", Namespace: "default"}}
+	r := bootstrapTestReconciler(t, cloudClient, ownedTestMachine(), ownerMachine(new(testBootstrapName)))
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testMachineName, Namespace: testNamespace}}
 
 	result, err := r.Reconcile(ctx, req)
 	if err != nil {
@@ -183,8 +182,8 @@ func TestBootstrapRejectsUnsupportedFormat(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()
 	r := bootstrapTestReconciler(t, cloudClient,
-		ownedTestMachine(), ownerMachine(ptr.To("test-bootstrap")), bootstrapSecret("ignition"))
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-machine", Namespace: "default"}}
+		ownedTestMachine(), ownerMachine(new(testBootstrapName)), bootstrapSecret("ignition"))
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testMachineName, Namespace: testNamespace}}
 
 	if _, err := r.Reconcile(ctx, req); err == nil {
 		t.Error("Reconcile succeeded with an ignition bootstrap secret, want an error")
@@ -198,7 +197,7 @@ func TestStandaloneMachineGetsNoScript(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()
 	r := reconcileTestReconciler(t, cloudClient, reconcileTestMachine())
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-machine", Namespace: "default"}}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testMachineName, Namespace: testNamespace}}
 
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatalf("Reconcile: %v", err)

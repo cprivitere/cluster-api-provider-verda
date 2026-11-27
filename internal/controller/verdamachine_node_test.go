@@ -42,7 +42,7 @@ const nodeTestIP = "203.0.113.10"
 // step finds its workload cluster.
 func labeledTestMachine() *infrastructurev1alpha1.VerdaMachine {
 	machine := reconcileTestMachine()
-	machine.Labels = map[string]string{clusterv1.ClusterNameLabel: "test-cluster"}
+	machine.Labels = map[string]string{clusterv1.ClusterNameLabel: testClusterName}
 	return machine
 }
 
@@ -50,7 +50,7 @@ func nodeTestReconciler(t *testing.T, cloudClient cloud.Client, workloadClient c
 	t.Helper()
 	r := bootstrapTestReconciler(t, cloudClient, machine)
 	r.ClusterCache = clustercache.NewFakeClusterCache(workloadClient,
-		client.ObjectKey{Namespace: "default", Name: "test-cluster"})
+		client.ObjectKey{Namespace: testNamespace, Name: testClusterName})
 	return r
 }
 
@@ -65,7 +65,7 @@ func workloadClientWith(t *testing.T, objs ...client.Object) client.Client {
 
 func uninitializedNode() *corev1.Node {
 	return &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-node"},
+		ObjectMeta: metav1.ObjectMeta{Name: testNodeName},
 		Spec: corev1.NodeSpec{
 			Taints: []corev1.Taint{{
 				Key:    uninitializedTaintKey,
@@ -96,7 +96,9 @@ func primeInstance(t *testing.T, ctx context.Context, r *VerdaMachineReconciler,
 	if len(instances) != 1 {
 		t.Fatalf("cloud has %d instances after priming, want 1", len(instances))
 	}
-	cloudClient.SetInstanceIP(instances[0].ID, nodeTestIP)
+	if err := cloudClient.SetInstanceIP(instances[0].ID, nodeTestIP); err != nil {
+		t.Fatalf("SetInstanceIP: %v", err)
+	}
 }
 
 func TestNodeGetsProviderIDAndTaintCleared(t *testing.T) {
@@ -104,17 +106,17 @@ func TestNodeGetsProviderIDAndTaintCleared(t *testing.T) {
 	cloudClient := cloud.NewFakeClient()
 	workload := workloadClientWith(t, uninitializedNode())
 	r := nodeTestReconciler(t, cloudClient, workload, labeledTestMachine())
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-machine", Namespace: "default"}}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testMachineName, Namespace: testNamespace}}
 	primeInstance(t, ctx, r, cloudClient, req)
 
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	node := &corev1.Node{}
-	if err := workload.Get(ctx, types.NamespacedName{Name: "test-node"}, node); err != nil {
+	if err := workload.Get(ctx, types.NamespacedName{Name: testNodeName}, node); err != nil {
 		t.Fatalf("Get node: %v", err)
 	}
-	if want := "verda://FIN-01/instance-0001"; node.Spec.ProviderID != want {
+	if want := testProviderID; node.Spec.ProviderID != want {
 		t.Errorf("node providerID = %q, want %q", node.Spec.ProviderID, want)
 	}
 	if len(node.Spec.Taints) != 0 {
@@ -127,7 +129,7 @@ func TestNodeStepWaitsForNodeToRegister(t *testing.T) {
 	cloudClient := cloud.NewFakeClient()
 	workload := workloadClientWith(t)
 	r := nodeTestReconciler(t, cloudClient, workload, labeledTestMachine())
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-machine", Namespace: "default"}}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testMachineName, Namespace: testNamespace}}
 	primeInstance(t, ctx, r, cloudClient, req)
 
 	result, err := r.Reconcile(ctx, req)
@@ -143,11 +145,11 @@ func TestNodeStepQuietWhenAlreadyInitialized(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()
 	node := uninitializedNode()
-	node.Spec.ProviderID = "verda://FIN-01/instance-0001"
+	node.Spec.ProviderID = testProviderID
 	node.Spec.Taints = nil
 	workload := workloadClientWith(t, node)
 	r := nodeTestReconciler(t, cloudClient, workload, labeledTestMachine())
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-machine", Namespace: "default"}}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testMachineName, Namespace: testNamespace}}
 	primeInstance(t, ctx, r, cloudClient, req)
 
 	result, err := r.Reconcile(ctx, req)
@@ -179,19 +181,19 @@ func nodeWithUUID(name, systemUUID, externalIP string) *corev1.Node {
 func TestNodeMatchedBySystemUUID(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()
-	workload := workloadClientWith(t, nodeWithUUID("test-node", "instance-0001", "203.0.113.99"))
+	workload := workloadClientWith(t, nodeWithUUID(testNodeName, "instance-0001", "203.0.113.99"))
 	r := nodeTestReconciler(t, cloudClient, workload, labeledTestMachine())
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-machine", Namespace: "default"}}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testMachineName, Namespace: testNamespace}}
 	primeInstance(t, ctx, r, cloudClient, req)
 
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	node := &corev1.Node{}
-	if err := workload.Get(ctx, types.NamespacedName{Name: "test-node"}, node); err != nil {
+	if err := workload.Get(ctx, types.NamespacedName{Name: testNodeName}, node); err != nil {
 		t.Fatalf("Get node: %v", err)
 	}
-	if want := "verda://FIN-01/instance-0001"; node.Spec.ProviderID != want {
+	if want := testProviderID; node.Spec.ProviderID != want {
 		t.Errorf("node providerID = %q, want %q", node.Spec.ProviderID, want)
 	}
 	if len(node.Spec.Taints) != 0 {
@@ -209,7 +211,7 @@ func TestNodeUUIDMatchWinsOverIPMatch(t *testing.T) {
 	uuidNode := nodeWithUUID("uuid-node", "instance-0001", "203.0.113.99")
 	workload := workloadClientWith(t, ipNode, uuidNode)
 	r := nodeTestReconciler(t, cloudClient, workload, labeledTestMachine())
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-machine", Namespace: "default"}}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testMachineName, Namespace: testNamespace}}
 	primeInstance(t, ctx, r, cloudClient, req)
 
 	if _, err := r.Reconcile(ctx, req); err != nil {
@@ -219,7 +221,7 @@ func TestNodeUUIDMatchWinsOverIPMatch(t *testing.T) {
 	if err := workload.Get(ctx, types.NamespacedName{Name: "uuid-node"}, node); err != nil {
 		t.Fatalf("Get uuid-node: %v", err)
 	}
-	if want := "verda://FIN-01/instance-0001"; node.Spec.ProviderID != want {
+	if want := testProviderID; node.Spec.ProviderID != want {
 		t.Errorf("uuid-node providerID = %q, want %q", node.Spec.ProviderID, want)
 	}
 	if len(node.Spec.Taints) != 0 {
@@ -241,7 +243,7 @@ func TestNodeStepSkippedWithoutClusterCache(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()
 	r := bootstrapTestReconciler(t, cloudClient, labeledTestMachine())
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-machine", Namespace: "default"}}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testMachineName, Namespace: testNamespace}}
 
 	result, err := r.Reconcile(ctx, req)
 	if err != nil {

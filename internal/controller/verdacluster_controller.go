@@ -20,7 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
+	"strings"
 	"time"
 
 	verdasdk "github.com/verda-cloud/verdacloud-sdk-go/pkg/verda"
@@ -107,7 +108,7 @@ func (r *VerdaClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	if !ptr.Deref(cluster.Status.Initialization.Provisioned, false) {
 		base := cluster.DeepCopy()
-		cluster.Status.Initialization.Provisioned = ptr.To(true)
+		cluster.Status.Initialization.Provisioned = new(true)
 		if err := r.Status().Patch(ctx, cluster, client.MergeFrom(base)); err != nil {
 			return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 		}
@@ -131,7 +132,7 @@ func (r *VerdaClusterReconciler) findControlPlaneInstance(ctx context.Context, c
 	if err != nil {
 		return nil, err
 	}
-	sort.Slice(found, func(i, j int) bool { return found[i].ID < found[j].ID })
+	slices.SortFunc(found, func(a, b verdasdk.Instance) int { return strings.Compare(a.ID, b.ID) })
 	for i := range found {
 		inst := &found[i]
 		if inst.Status == "running" && inst.IP != nil && *inst.IP != "" {

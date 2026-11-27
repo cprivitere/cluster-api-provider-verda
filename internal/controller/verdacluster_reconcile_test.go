@@ -36,11 +36,11 @@ import (
 func reconcileTestCluster() *infrastructurev1alpha1.VerdaCluster {
 	return &infrastructurev1alpha1.VerdaCluster{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-cluster",
-			Namespace: "default",
-			Labels:    map[string]string{clusterNameLabel: "test-cluster"},
+			Name:      testClusterName,
+			Namespace: testNamespace,
+			Labels:    map[string]string{clusterNameLabel: testClusterName},
 		},
-		Spec: infrastructurev1alpha1.VerdaClusterSpec{Location: "FIN-01"},
+		Spec: infrastructurev1alpha1.VerdaClusterSpec{Location: testLocation},
 	}
 }
 
@@ -63,9 +63,9 @@ func clusterTestReconciler(t *testing.T, cloudClient cloud.Client, objs ...clien
 func seedInstance(t *testing.T, ctx context.Context, cloudClient *cloud.FakeClient, role, ip string) *verdasdk.Instance {
 	t.Helper()
 	inst, err := cloudClient.CreateInstance(ctx, verdasdk.CreateInstanceRequest{
-		InstanceType: "CPU.4V.16G",
-		Image:        "26.04.cuda13.4",
-		LocationCode: "FIN-01",
+		InstanceType: testInstanceType,
+		Image:        testImage,
+		LocationCode: testLocation,
 		Tags:         cloud.MachineTags("default/test-cluster", "default/test-machine", role),
 	})
 	if err != nil {
@@ -82,7 +82,7 @@ func seedInstance(t *testing.T, ctx context.Context, cloudClient *cloud.FakeClie
 func getCluster(t *testing.T, ctx context.Context, r *VerdaClusterReconciler) *infrastructurev1alpha1.VerdaCluster {
 	t.Helper()
 	cluster := &infrastructurev1alpha1.VerdaCluster{}
-	if err := r.Get(ctx, types.NamespacedName{Name: "test-cluster", Namespace: "default"}, cluster); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: testClusterName, Namespace: testNamespace}, cluster); err != nil {
 		t.Fatalf("Get after reconcile: %v", err)
 	}
 	return cluster
@@ -93,7 +93,7 @@ func TestClusterReconcilePublishesEndpoint(t *testing.T) {
 	cloudClient := cloud.NewFakeClient()
 	seedInstance(t, ctx, cloudClient, cloud.RoleControlPlane, "203.0.113.10")
 	r := clusterTestReconciler(t, cloudClient, reconcileTestCluster())
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-cluster", Namespace: "default"}}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName, Namespace: testNamespace}}
 
 	result, err := r.Reconcile(ctx, req)
 	if err != nil {
@@ -124,7 +124,7 @@ func TestClusterReconcileWaitsForControlPlane(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()
 	r := clusterTestReconciler(t, cloudClient, reconcileTestCluster())
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-cluster", Namespace: "default"}}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName, Namespace: testNamespace}}
 
 	result, err := r.Reconcile(ctx, req)
 	if err != nil {
@@ -147,7 +147,7 @@ func TestClusterReconcileIgnoresWorkers(t *testing.T) {
 	cloudClient := cloud.NewFakeClient()
 	seedInstance(t, ctx, cloudClient, cloud.RoleWorker, "203.0.113.20")
 	r := clusterTestReconciler(t, cloudClient, reconcileTestCluster())
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-cluster", Namespace: "default"}}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName, Namespace: testNamespace}}
 
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -166,7 +166,7 @@ func TestClusterReconcileWaitsForRunningInstance(t *testing.T) {
 		t.Fatalf("SetInstanceStatus: %v", err)
 	}
 	r := clusterTestReconciler(t, cloudClient, reconcileTestCluster())
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-cluster", Namespace: "default"}}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName, Namespace: testNamespace}}
 
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatalf("Reconcile: %v", err)

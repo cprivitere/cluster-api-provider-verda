@@ -57,7 +57,8 @@ write_files:
       This file is a placeholder.
 runcmd:
 -   'echo pre-kubeadm'
--   'kubeadm init --config ` + root + `/run/kubeadm/kubeadm.yaml --v=5 && echo success > ` + root + `/run/cluster-api/bootstrap-success.complete'
+-   'kubeadm init --config ` + root + `/run/kubeadm/kubeadm.yaml --v=5 && echo success > ` + root +
+		`/run/cluster-api/bootstrap-success.complete'
 -   'echo post-kubeadm'
 `
 }
@@ -70,14 +71,15 @@ func TestTranslateInitShape(t *testing.T) {
 	if !strings.HasPrefix(script, "#!/bin/bash\n") {
 		t.Errorf("script does not start with a bash shebang:\n%s", script[:80])
 	}
-	for _, line := range strings.Split(script, "\n") {
+	for line := range strings.SplitSeq(script, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "set -e" || strings.HasPrefix(trimmed, "set -e ") || strings.HasPrefix(trimmed, "set -o errexit") {
 			t.Errorf("script must not enable errexit (cloud-init runs every runcmd entry); found %q", trimmed)
 		}
 	}
 	// The kubeadm entry and its sentinel chain survive verbatim.
-	want := "kubeadm init --config /REALROOT/run/kubeadm/kubeadm.yaml --v=5 && echo success > /REALROOT/run/cluster-api/bootstrap-success.complete"
+	want := "kubeadm init --config /REALROOT/run/kubeadm/kubeadm.yaml --v=5 && echo success > " +
+		"/REALROOT/run/cluster-api/bootstrap-success.complete"
 	if !strings.Contains(script, want) {
 		t.Errorf("kubeadm line not preserved verbatim; want %q in:\n%s", want, script)
 	}
@@ -87,7 +89,7 @@ func TestTranslateInitShape(t *testing.T) {
 	idxKubeadm := strings.Index(script, "kubeadm init")
 	idxPre := strings.Index(script, "echo pre-kubeadm")
 	idxPost := strings.Index(script, "echo post-kubeadm")
-	if !(idxFile < idxPre && idxPre < idxKubeadm && idxKubeadm < idxPost) {
+	if idxFile >= idxPre || idxPre >= idxKubeadm || idxKubeadm >= idxPost {
 		t.Errorf("ordering wrong: file=%d pre=%d kubeadm=%d post=%d\n%s", idxFile, idxPre, idxKubeadm, idxPost, script)
 	}
 	if !strings.Contains(script, "chmod '0640' '/REALROOT/etc/kubernetes/pki/ca.crt'") {

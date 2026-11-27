@@ -33,13 +33,27 @@ import (
 	"github.com/cprivitere/cluster-api-provider-verda/pkg/cloud"
 )
 
+// Shared fixture values for the controller test suites (goconst:
+// these literals recur across the package's test files).
+const (
+	testClusterName   = "test-cluster"
+	testMachineName   = "test-machine"
+	testBootstrapName = "test-bootstrap"
+	testNodeName      = "test-node"
+	testNamespace     = "default"
+	testLocation      = "FIN-01"
+	testInstanceType  = "CPU.4V.16G"
+	testImage         = "26.04.cuda13.4"
+	testProviderID    = "verda://FIN-01/instance-0001"
+)
+
 func reconcileTestMachine() *infrastructurev1alpha1.VerdaMachine {
 	return &infrastructurev1alpha1.VerdaMachine{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-machine", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testMachineName, Namespace: testNamespace},
 		Spec: infrastructurev1alpha1.VerdaMachineSpec{
-			InstanceType: "CPU.4V.16G",
-			Image:        "26.04.cuda13.4",
-			Location:     "FIN-01",
+			InstanceType: testInstanceType,
+			Image:        testImage,
+			Location:     testLocation,
 			SSHKeyIDs:    []string{"key-1"},
 		},
 	}
@@ -63,7 +77,7 @@ func TestReconcileCreatesOneInstanceAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()
 	r := reconcileTestReconciler(t, cloudClient, reconcileTestMachine())
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-machine", Namespace: "default"}}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testMachineName, Namespace: testNamespace}}
 
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatalf("first Reconcile: %v", err)
@@ -107,7 +121,7 @@ func TestReconcileCreatesOneInstanceAndIsIdempotent(t *testing.T) {
 	if len(instances) != 1 {
 		t.Fatalf("cloud has %d instances after two reconciles, want 1", len(instances))
 	}
-	if instances[0].InstanceType != "CPU.4V.16G" || instances[0].Image != "26.04.cuda13.4" {
+	if instances[0].InstanceType != testInstanceType || instances[0].Image != testImage {
 		t.Errorf("instance created from wrong spec: %+v", instances[0])
 	}
 	tagged, err := cloudClient.FindInstancesByTags(ctx, map[string]string{cloud.TagMachineName: "default/test-machine"})
@@ -124,7 +138,7 @@ func TestReconcileDeleteRemovesInstanceAndFinalizer(t *testing.T) {
 	cloudClient := cloud.NewFakeClient()
 	machine := reconcileTestMachine()
 	r := reconcileTestReconciler(t, cloudClient, machine)
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-machine", Namespace: "default"}}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testMachineName, Namespace: testNamespace}}
 
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatalf("Reconcile (create): %v", err)
@@ -163,7 +177,7 @@ func TestReconcileSurfacesDiscontinuedSpot(t *testing.T) {
 	machine := reconcileTestMachine()
 	machine.Spec.IsSpot = true
 	r := reconcileTestReconciler(t, cloudClient, machine)
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-machine", Namespace: "default"}}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testMachineName, Namespace: testNamespace}}
 
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatalf("Reconcile (create): %v", err)
