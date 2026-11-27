@@ -97,7 +97,13 @@ func (r *VerdaMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	// Reflect the instance onto the status.
+	// Reflect the instance onto the status. The status is written
+	// with a patch, not an update: a patch carries no resourceVersion
+	// precondition, so it cannot lose the optimistic-concurrency race
+	// when watch events fire reconciles in quick succession against a
+	// lagging cache (observed live Nov 26, 2026: "the object has been
+	// modified" from Status().Update).
+	base := machine.DeepCopy()
 	wasReady := machine.Status.Ready
 	machine.Status.Addresses = addressesOf(inst)
 	switch inst.Status {
@@ -114,7 +120,7 @@ func (r *VerdaMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	default:
 		machine.Status.Ready = false
 	}
-	if err := r.Status().Update(ctx, machine); err != nil {
+	if err := r.Status().Patch(ctx, machine, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
 	}
 
@@ -247,8 +253,9 @@ func (r *VerdaMachineReconciler) recordProviderID(ctx context.Context, machine *
 	if machine.Spec.ProviderID != nil && *machine.Spec.ProviderID == pid {
 		return nil
 	}
+	base := machine.DeepCopy()
 	machine.Spec.ProviderID = &pid
-	if err := r.Update(ctx, machine); err != nil {
+	if err := r.Patch(ctx, machine, client.MergeFrom(base)); err != nil {
 		return fmt.Errorf("recording providerID: %w", err)
 	}
 	return nil
