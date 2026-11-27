@@ -68,11 +68,16 @@ func (c *verdaClient) CreateInstance(ctx context.Context, req verda.CreateInstan
 	return c.sdk.Instances.Create(ctx, req)
 }
 
+// isNotFoundError reports whether err is a Verda API 404.
+func isNotFoundError(err error) bool {
+	var apiErr *verda.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
+}
+
 func (c *verdaClient) GetInstance(ctx context.Context, id string) (*verda.Instance, error) {
 	inst, err := c.sdk.Instances.GetByID(ctx, id)
 	if err != nil {
-		var apiErr *verda.APIError
-		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+		if isNotFoundError(err) {
 			return nil, fmt.Errorf("%w: instance %s", ErrNotFound, id)
 		}
 		return nil, err
@@ -93,7 +98,10 @@ func (c *verdaClient) DeleteInstance(ctx context.Context, id string) error {
 }
 
 func (c *verdaClient) DeleteInstanceWithVolumes(ctx context.Context, id string) error {
-	inst, err := c.sdk.Instances.GetByID(ctx, id)
+	inst, err := c.GetInstance(ctx, id)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -102,7 +110,30 @@ func (c *verdaClient) DeleteInstanceWithVolumes(ctx context.Context, id string) 
 		volumeIDs = append(volumeIDs, *inst.OSVolumeID)
 	}
 	volumeIDs = append(volumeIDs, inst.VolumeIDs...)
-	return c.sdk.Instances.Delete(ctx, []string{id}, volumeIDs, true)
+
+	// Delete the instance together with its volumes.
+	err = c.sdk.Instances.Delete(ctx, []string{id}, volumeIDs, true)
+	if err == nil {
+		return nil
+	}
+	// The combined call races the platform's own teardown: deleting
+	// the instance retires its OS volume platform-side, so the
+	// explicit volume list can 404 ("Volume ID doesn't exist") even
+	// though the deletion is proceeding — observed live Nov 26,
+	// 2026. Verify the end state instead of trusting the call: if
+	// the instance is gone, sweep any surviving volumes individually
+	// and tolerate the ones the platform already took. If the
+	// instance is still there, the failure is real and the caller
+	// should see it.
+	if _, getErr := c.GetInstance(ctx, id); !errors.Is(getErr, ErrNotFound) {
+		return err
+	}
+	for _, volumeID := range volumeIDs {
+		if volErr := c.sdk.Volumes.DeleteVolume(ctx, volumeID, true); volErr != nil && !isNotFoundError(volErr) {
+			return fmt.Errorf("deleting volume %s: %w", volumeID, volErr)
+		}
+	}
+	return nil
 }
 
 func (c *verdaClient) CreateStartupScript(ctx context.Context, name, script string) (*verda.StartupScript, error) {

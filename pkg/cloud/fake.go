@@ -18,6 +18,7 @@ package cloud
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -144,7 +145,12 @@ func (f *FakeClient) DeleteInstance(_ context.Context, id string) error {
 }
 
 func (f *FakeClient) DeleteInstanceWithVolumes(ctx context.Context, id string) error {
-	return f.DeleteInstance(ctx, id)
+	// Same contract as the real client: deleting what is already
+	// gone is success, not an error.
+	if err := f.DeleteInstance(ctx, id); err != nil && !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	return nil
 }
 
 func (f *FakeClient) CreateStartupScript(_ context.Context, name, script string) (*verda.StartupScript, error) {

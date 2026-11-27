@@ -98,6 +98,7 @@ func (r *VerdaMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Reflect the instance onto the status.
+	wasReady := machine.Status.Ready
 	machine.Status.Addresses = addressesOf(inst)
 	switch inst.Status {
 	case "running":
@@ -115,6 +116,13 @@ func (r *VerdaMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	if err := r.Status().Update(ctx, machine); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
+	}
+
+	if machine.Status.Ready && !wasReady {
+		// Name the success transition: without this line the log
+		// goes quiet at exactly the moment the machine comes up,
+		// which reads like a stall (observed live Nov 26, 2026).
+		log.Info("Instance is ready", "instanceID", inst.ID)
 	}
 
 	if !machine.Status.Ready && machine.Status.FailureMessage == nil {
