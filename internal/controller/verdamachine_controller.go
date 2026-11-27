@@ -335,10 +335,8 @@ const uninitializedTaintKey = "node.cloudprovider.kubernetes.io/uninitialized"
 // cluster (decision 13): once the instance's node has registered,
 // set the node's providerID to this machine's and clear the
 // uninitialized taint, so core Cluster API can correlate the
-// Machine with its Node. The node is matched by address — the
-// instance's public or private IP among the node's IPs — because
-// the node name is the instance hostname, which Verda controls,
-// while the addresses come from the cloud record itself.
+// Machine with its Node. The node is matched by system UUID
+// first and by address second — see findNodeForInstance.
 //
 // done=false means "not yet": the node has not registered. Errors
 // are the caller's to soften — a workload cluster that isn't up
@@ -374,9 +372,28 @@ func (r *VerdaMachineReconciler) reconcileNode(ctx context.Context, machine *inf
 	return true, nil
 }
 
-// findNodeForInstance returns the node whose internal or external
-// IP is one of the instance's addresses, or nil.
+// findNodeForInstance returns the node that belongs to the
+// instance, or nil.
+//
+// The primary key is the node's system UUID: Verda sets the
+// guest's SMBIOS/DMI UUID to the instance ID (verified live
+// 2026-11-27 — /sys/class/dmi/id/product_uuid inside a guest
+// prints exactly the instance ID), and kubelet reports that UUID
+// as status.nodeInfo.systemUUID. Matching on it ties the node to
+// the instance's identity rather than to an address that could
+// later be reused by a different instance.
+//
+// The fallback is address matching — the node's internal or
+// external IP among the instance's public/private IPs — for
+// nodes whose systemUUID is empty or unreported.
 func findNodeForInstance(nodes *corev1.NodeList, inst *verdasdk.Instance) *corev1.Node {
+	if inst.ID != "" {
+		for i := range nodes.Items {
+			if strings.EqualFold(nodes.Items[i].Status.NodeInfo.SystemUUID, inst.ID) {
+				return &nodes.Items[i]
+			}
+		}
+	}
 	ips := make(map[string]bool)
 	if inst.IP != nil {
 		ips[*inst.IP] = true

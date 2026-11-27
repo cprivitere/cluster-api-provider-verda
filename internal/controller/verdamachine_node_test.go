@@ -159,6 +159,84 @@ func TestNodeStepQuietWhenAlreadyInitialized(t *testing.T) {
 	}
 }
 
+// nodeWithUUID is the uninitialized test node carrying a system
+// UUID and a chosen external address.
+func nodeWithUUID(name, systemUUID, externalIP string) *corev1.Node {
+	node := uninitializedNode()
+	node.Name = name
+	node.Status.NodeInfo.SystemUUID = systemUUID
+	node.Status.Addresses = []corev1.NodeAddress{
+		{Type: corev1.NodeInternalIP, Address: "10.0.0.5"},
+		{Type: corev1.NodeExternalIP, Address: externalIP},
+	}
+	return node
+}
+
+// The node's addresses deliberately do not include the instance's
+// IP, so only the systemUUID match can find it. (The pre-existing
+// TestNodeGetsProviderIDAndTaintCleared covers the IP fallback:
+// its node reports no systemUUID.)
+func TestNodeMatchedBySystemUUID(t *testing.T) {
+	ctx := context.Background()
+	cloudClient := cloud.NewFakeClient()
+	workload := workloadClientWith(t, nodeWithUUID("test-node", "instance-0001", "203.0.113.99"))
+	r := nodeTestReconciler(t, cloudClient, workload, labeledTestMachine())
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-machine", Namespace: "default"}}
+	primeInstance(t, ctx, r, cloudClient, req)
+
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	node := &corev1.Node{}
+	if err := workload.Get(ctx, types.NamespacedName{Name: "test-node"}, node); err != nil {
+		t.Fatalf("Get node: %v", err)
+	}
+	if want := "verda://FIN-01/instance-0001"; node.Spec.ProviderID != want {
+		t.Errorf("node providerID = %q, want %q", node.Spec.ProviderID, want)
+	}
+	if len(node.Spec.Taints) != 0 {
+		t.Errorf("node taints = %v, want the uninitialized taint cleared", node.Spec.Taints)
+	}
+}
+
+// With one node matching by address only and another matching by
+// systemUUID, the UUID match wins: identity beats a reusable
+// address.
+func TestNodeUUIDMatchWinsOverIPMatch(t *testing.T) {
+	ctx := context.Background()
+	cloudClient := cloud.NewFakeClient()
+	ipNode := nodeWithUUID("ip-node", "instance-9999", nodeTestIP)
+	uuidNode := nodeWithUUID("uuid-node", "instance-0001", "203.0.113.99")
+	workload := workloadClientWith(t, ipNode, uuidNode)
+	r := nodeTestReconciler(t, cloudClient, workload, labeledTestMachine())
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-machine", Namespace: "default"}}
+	primeInstance(t, ctx, r, cloudClient, req)
+
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	node := &corev1.Node{}
+	if err := workload.Get(ctx, types.NamespacedName{Name: "uuid-node"}, node); err != nil {
+		t.Fatalf("Get uuid-node: %v", err)
+	}
+	if want := "verda://FIN-01/instance-0001"; node.Spec.ProviderID != want {
+		t.Errorf("uuid-node providerID = %q, want %q", node.Spec.ProviderID, want)
+	}
+	if len(node.Spec.Taints) != 0 {
+		t.Errorf("uuid-node taints = %v, want the uninitialized taint cleared", node.Spec.Taints)
+	}
+	other := &corev1.Node{}
+	if err := workload.Get(ctx, types.NamespacedName{Name: "ip-node"}, other); err != nil {
+		t.Fatalf("Get ip-node: %v", err)
+	}
+	if other.Spec.ProviderID != "" {
+		t.Errorf("ip-node providerID = %q, want it untouched", other.Spec.ProviderID)
+	}
+	if len(other.Spec.Taints) != 1 {
+		t.Errorf("ip-node taints = %v, want the uninitialized taint intact", other.Spec.Taints)
+	}
+}
+
 func TestNodeStepSkippedWithoutClusterCache(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()
