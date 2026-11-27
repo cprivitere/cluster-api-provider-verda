@@ -28,13 +28,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	infrastructurev1alpha1 "github.com/cprivitere/cluster-api-provider-verda/api/v1alpha1"
+	"github.com/cprivitere/cluster-api-provider-verda/pkg/cloud"
 )
 
 var _ = Describe("VerdaMachine Controller", func() {
 	Context("When reconciling a resource", func() {
 		const (
 			resourceName      = "test-resource"
-			resourceNamespace = "default"
+			resourceNamespace = testNamespace
 		)
 
 		ctx := context.Background()
@@ -74,6 +75,7 @@ var _ = Describe("VerdaMachine Controller", func() {
 			controllerReconciler := &VerdaMachineReconciler{
 				Client: k8sClient,
 				Scheme: k8sClient.Scheme(),
+				Cloud:  cloud.NewFakeClient(),
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{

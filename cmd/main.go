@@ -189,8 +189,14 @@ func main() {
 
 	cloudClient, err := cloud.NewClientFromEnv()
 	if err != nil {
-		setupLog.Error(err, "Failed to create Verda cloud client")
-		os.Exit(1)
+		// Deliberately not fatal: without credentials the manager
+		// still starts and serves health and metrics (the e2e suite
+		// runs it exactly that way), and every reconcile fails
+		// loudly with "cloud client is not configured" until
+		// credentials are provided. Chris's call, Nov 27: tolerate
+		// the missing credentials, but log the error.
+		setupLog.Error(err, "Failed to create Verda cloud client; continuing without one, reconciles will fail")
+		cloudClient = nil
 	}
 
 	ctx := ctrl.SetupSignalHandler()

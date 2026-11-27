@@ -28,13 +28,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	infrastructurev1alpha1 "github.com/cprivitere/cluster-api-provider-verda/api/v1alpha1"
+	"github.com/cprivitere/cluster-api-provider-verda/pkg/cloud"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 )
 
 var _ = Describe("VerdaCluster Controller", func() {
 	Context("When reconciling a resource", func() {
 		const (
 			resourceName      = "test-resource"
-			resourceNamespace = "default"
+			resourceNamespace = testNamespace
 		)
 
 		ctx := context.Background()
@@ -54,7 +56,18 @@ var _ = Describe("VerdaCluster Controller", func() {
 						Name:      resourceName,
 						Namespace: resourceNamespace,
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: infrastructurev1alpha1.VerdaClusterSpec{
+						Location: testLocation,
+						// The generated CRD requires at least one
+						// property on controlPlaneEndpoint, so an
+						// entirely empty spec cannot be created
+						// through a Go client; a placeholder endpoint
+						// stands in until a reconcile replaces it.
+						ControlPlaneEndpoint: clusterv1.APIEndpoint{
+							Host: "192.0.2.1",
+							Port: 6443,
+						},
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}
@@ -74,6 +87,7 @@ var _ = Describe("VerdaCluster Controller", func() {
 			controllerReconciler := &VerdaClusterReconciler{
 				Client: k8sClient,
 				Scheme: k8sClient.Scheme(),
+				Cloud:  cloud.NewFakeClient(),
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
