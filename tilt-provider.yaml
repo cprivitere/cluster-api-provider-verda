@@ -1,0 +1,6 @@
+name: verda
+config:
+  image: "controller:latest"
+  go_main: "cmd/main.go"
+  live_reload_deps: ["go.mod", "go.sum", "api", "cmd", "internal", "pkg"]
+  label: CAPVE
