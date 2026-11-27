@@ -325,7 +325,7 @@ func emitNTP(b *strings.Builder, ntp *ntpConfig) {
 	b.WriteString("\n# --- ntp (systemd-timesyncd) ---\n")
 	b.WriteString("mkdir -p /etc/systemd/timesyncd.conf.d\n")
 	delim := "EOF_NTP"
-	fmt.Fprintf(b, "cat > /etc/systemd/timesyncd.conf.d/99-capv.conf <<'%s'\n[Time]\nNTP=%s\n%s\n", delim, strings.Join(ntp.Servers, " "), delim)
+	fmt.Fprintf(b, "cat > /etc/systemd/timesyncd.conf.d/99-capve.conf <<'%s'\n[Time]\nNTP=%s\n%s\n", delim, strings.Join(ntp.Servers, " "), delim)
 	b.WriteString("systemctl restart systemd-timesyncd || true\n")
 }
 
@@ -355,7 +355,7 @@ func emitRunCmd(b *strings.Builder, cmds []string) {
 }
 
 func heredocDelimiter(index int) string {
-	return "EOF_CAPV_" + strconv.Itoa(index)
+	return "EOF_CAPVE_" + strconv.Itoa(index)
 }
 
 // shellQuote single-quotes s for safe inclusion in a bash command.

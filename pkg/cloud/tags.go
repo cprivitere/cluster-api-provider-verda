@@ -25,16 +25,19 @@ import (
 // Tag keys the provider stamps on every instance it creates. They are
 // the identity a reconciler looks up before creating (the API has no
 // idempotency key), so they are part of the provider's contract with
-// itself: never rename them casually.
+// itself: never rename them casually. (The one rename, capv.* ->
+// capve.*, happened Nov 27 before any cluster had been created with
+// them: CAPV is Cluster API Provider vSphere's abbreviation, so this
+// provider goes by CAPVE.)
 const (
 	// TagClusterName identifies the Cluster API Cluster an instance
 	// belongs to, as "<namespace>/<name>".
-	TagClusterName = "capv.cluster"
+	TagClusterName = "capve.cluster"
 	// TagMachineName identifies the Cluster API Machine an instance
 	// belongs to, as "<namespace>/<name>".
-	TagMachineName = "capv.machine"
+	TagMachineName = "capve.machine"
 	// TagRole distinguishes control plane from worker instances.
-	TagRole = "capv.role"
+	TagRole = "capve.role"
 )
 
 // Role values for TagRole.

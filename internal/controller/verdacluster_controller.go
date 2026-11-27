@@ -141,7 +141,7 @@ func (r *VerdaClusterReconciler) findControlPlaneInstance(ctx context.Context, c
 	return nil, nil
 }
 
-// clusterKeyFor renders the capv.cluster tag value the machine
+// clusterKeyFor renders the capve.cluster tag value the machine
 // controller stamps on this cluster's instances: the cluster-name
 // label when present, the object itself otherwise (standalone use).
 // It mirrors clusterNameFor on the machine side.
