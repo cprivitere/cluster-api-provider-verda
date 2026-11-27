@@ -64,6 +64,20 @@ func (f *FakeClient) SetInstanceStatus(id, status string) error {
 	return nil
 }
 
+// SetInstanceIP overrides a stored instance's public IP. It exists
+// for the same reason as SetInstanceStatus: the real API assigns an
+// address on its own schedule, and tests need to drive that.
+func (f *FakeClient) SetInstanceIP(id, ip string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	inst, ok := f.instances[id]
+	if !ok {
+		return fmt.Errorf("%w: instance %s", ErrNotFound, id)
+	}
+	inst.IP = &ip
+	return nil
+}
+
 func (f *FakeClient) nextID(prefix string) string {
 	f.seq++
 	return fmt.Sprintf("%s-%04d", prefix, f.seq)

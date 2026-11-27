@@ -183,19 +183,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&controller.VerdaClusterReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "verdacluster")
-		os.Exit(1)
-	}
 	cloudClient, err := cloud.NewClientFromEnv()
 	if err != nil {
 		setupLog.Error(err, "Failed to create Verda cloud client")
 		os.Exit(1)
 	}
 
+	if err := (&controller.VerdaClusterReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		Cloud:  cloudClient,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "verdacluster")
+		os.Exit(1)
+	}
 	if err := (&controller.VerdaMachineReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
