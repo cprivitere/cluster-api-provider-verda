@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -71,11 +72,18 @@ func TestReconcileCreatesOneInstanceAndIsIdempotent(t *testing.T) {
 	if err := r.Get(ctx, req.NamespacedName, machine); err != nil {
 		t.Fatalf("Get after reconcile: %v", err)
 	}
-	if machine.Spec.ProviderID == nil || *machine.Spec.ProviderID == "" {
+	if machine.Spec.ProviderID == "" {
 		t.Fatal("providerID was not recorded")
 	}
 	if !machine.Status.Ready {
 		t.Error("status.ready is false, want true for a running instance")
+	}
+	if machine.Status.Initialization.Provisioned == nil || !*machine.Status.Initialization.Provisioned {
+		t.Error("status.initialization.provisioned is not true for a running instance (the v1beta2 contract signal)")
+	}
+	cond := meta.FindStatusCondition(machine.Status.Conditions, infrastructurev1alpha1.ReadyCondition)
+	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != infrastructurev1alpha1.InstanceRunningReason {
+		t.Errorf("Ready condition = %+v, want True/%s", cond, infrastructurev1alpha1.InstanceRunningReason)
 	}
 	foundFinalizer := false
 	for _, f := range machine.Finalizers {
@@ -163,9 +171,9 @@ func TestReconcileSurfacesDiscontinuedSpot(t *testing.T) {
 	if err := r.Get(ctx, req.NamespacedName, stored); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	id, ok := instanceIDFromProviderID(*stored.Spec.ProviderID)
+	id, ok := instanceIDFromProviderID(stored.Spec.ProviderID)
 	if !ok {
-		t.Fatalf("providerID %q did not parse", *stored.Spec.ProviderID)
+		t.Fatalf("providerID %q did not parse", stored.Spec.ProviderID)
 	}
 	if err := cloudClient.SetInstanceStatus(id, instanceStatusDiscontinued); err != nil {
 		t.Fatalf("SetInstanceStatus: %v", err)
@@ -183,6 +191,10 @@ func TestReconcileSurfacesDiscontinuedSpot(t *testing.T) {
 	}
 	if final.Status.FailureMessage == nil {
 		t.Error("status.failureMessage is not set for a discontinued instance")
+	}
+	cond := meta.FindStatusCondition(final.Status.Conditions, infrastructurev1alpha1.ReadyCondition)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != infrastructurev1alpha1.InstanceDiscontinuedReason {
+		t.Errorf("Ready condition = %+v, want False/%s (the contract-visible discontinued signal)", cond, infrastructurev1alpha1.InstanceDiscontinuedReason)
 	}
 	instances, err := cloudClient.ListInstances(ctx, nil)
 	if err != nil {

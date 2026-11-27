@@ -19,6 +19,7 @@ package v1alpha1
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
@@ -29,9 +30,10 @@ type VerdaMachineSpec struct {
 	// providerID is the Verda instance this machine manages, in the
 	// form verda://<location>/<instance-id>. The controller sets it
 	// once the instance exists; on later passes it is the identity
-	// the reconciler trusts.
+	// the reconciler trusts. A plain string, per the Cluster API
+	// v1beta2 contract guidance for infrastructure machines.
 	// +optional
-	ProviderID *string `json:"providerID,omitempty"`
+	ProviderID string `json:"providerID,omitempty"`
 
 	// instanceType is the Verda instance type, e.g. CPU.4V.16G.
 	InstanceType string `json:"instanceType"`
@@ -56,42 +58,56 @@ type VerdaMachineSpec struct {
 	IsSpot bool `json:"isSpot,omitempty"`
 }
 
-// MachineAddressType is the kind of a MachineAddress. The values
-// mirror clusterv1.MachineAddressType; the type is local for now so
-// the provider does not take the cluster-api dependency until the
-// Cluster API composition lands.
-type MachineAddressType string
-
+// Condition types and reasons the VerdaMachine reconciler
+// maintains. The Ready condition is the contract-visible signal:
+// core Cluster API mirrors an infrastructure machine's Ready
+// condition into the Machine's InfrastructureReady condition, and
+// unlike the v1beta1-era failure fields it carries lifecycle
+// meaning under the v1beta2 contract.
 const (
-	// MachineExternalIP is the instance's public IP address.
-	MachineExternalIP MachineAddressType = "ExternalIP"
-	// MachineInternalIP is the instance's private IP address.
-	MachineInternalIP MachineAddressType = "InternalIP"
-	// MachineHostName is the instance's hostname.
-	MachineHostName MachineAddressType = "Hostname"
-)
+	// ReadyCondition reports whether the machine's instance is up.
+	ReadyCondition = "Ready"
 
-// MachineAddress is one network address of a machine's instance,
-// mirroring clusterv1.MachineAddress.
-type MachineAddress struct {
-	Type    MachineAddressType `json:"type"`
-	Address string             `json:"address"`
-}
+	// InstanceRunningReason marks Ready true: the instance is running.
+	InstanceRunningReason = "InstanceRunning"
+	// InstanceProvisioningReason marks Ready false while the
+	// instance is still coming up.
+	InstanceProvisioningReason = "InstanceProvisioning"
+	// InstanceDiscontinuedReason marks Ready false because the spot
+	// instance was discontinued; the machine is not recreated
+	// implicitly in that state — a human decides.
+	InstanceDiscontinuedReason = "InstanceDiscontinued"
+)
 
 // VerdaMachineStatus defines the observed state of VerdaMachine.
 type VerdaMachineStatus struct {
+	// initialization carries the Cluster API v1beta2 contract's
+	// provisioning signal: provisioned flips true once the instance
+	// exists, and core surfaces the providerID and addresses onto
+	// the Machine at the same moment.
+	// +optional
+	Initialization InitializationStatus `json:"initialization,omitempty"`
+
 	// ready reports whether the instance exists and is running.
+	// Kept as a human convenience; the contract signal is
+	// initialization.provisioned.
 	// +optional
 	Ready bool `json:"ready,omitempty"`
 
 	// addresses are the instance's network addresses.
 	// +optional
-	Addresses []MachineAddress `json:"addresses,omitempty"`
+	Addresses []clusterv1.MachineAddress `json:"addresses,omitempty"`
+
+	// interruptible reports whether the backing instance can be
+	// interrupted (a spot instance). Core reflects it onto the
+	// Node as the cluster.x-k8s.io/interruptible label.
+	// +optional
+	Interruptible *bool `json:"interruptible,omitempty"`
 
 	// failureMessage is set when the instance reaches a state the
 	// operator should know about — currently a spot instance being
-	// discontinued. The machine is not recreated implicitly in that
-	// state; a human decides.
+	// discontinued. It is the human-readable companion to the Ready
+	// condition; the condition is the contract-visible signal.
 	// +optional
 	FailureMessage *string `json:"failureMessage,omitempty"`
 

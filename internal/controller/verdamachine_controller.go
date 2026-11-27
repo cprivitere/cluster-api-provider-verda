@@ -25,7 +25,11 @@ import (
 
 	verdasdk "github.com/verda-cloud/verdacloud-sdk-go/pkg/verda"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/ptr"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -106,19 +110,42 @@ func (r *VerdaMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	base := machine.DeepCopy()
 	wasReady := machine.Status.Ready
 	machine.Status.Addresses = addressesOf(inst)
+	machine.Status.Initialization.Provisioned = ptr.To(true)
+	machine.Status.Interruptible = ptr.To(machine.Spec.IsSpot)
 	switch inst.Status {
 	case "running":
 		machine.Status.Ready = true
 		machine.Status.FailureMessage = nil
+		meta.SetStatusCondition(&machine.Status.Conditions, metav1.Condition{
+			Type:    infrastructurev1alpha1.ReadyCondition,
+			Status:  metav1.ConditionTrue,
+			Reason:  infrastructurev1alpha1.InstanceRunningReason,
+			Message: "Instance is running",
+		})
 	case instanceStatusDiscontinued:
 		// A discontinued spot instance still exists as an object, so
 		// it never falls into the recreate path below: surface it and
 		// let a human decide whether the machine should be replaced.
+		// The Ready condition is the contract-visible signal (core
+		// mirrors it into the Machine's InfrastructureReady
+		// condition); failureMessage is its human-readable companion.
 		machine.Status.Ready = false
 		msg := fmt.Sprintf("instance %s was discontinued", inst.ID)
 		machine.Status.FailureMessage = &msg
+		meta.SetStatusCondition(&machine.Status.Conditions, metav1.Condition{
+			Type:    infrastructurev1alpha1.ReadyCondition,
+			Status:  metav1.ConditionFalse,
+			Reason:  infrastructurev1alpha1.InstanceDiscontinuedReason,
+			Message: msg,
+		})
 	default:
 		machine.Status.Ready = false
+		meta.SetStatusCondition(&machine.Status.Conditions, metav1.Condition{
+			Type:    infrastructurev1alpha1.ReadyCondition,
+			Status:  metav1.ConditionFalse,
+			Reason:  infrastructurev1alpha1.InstanceProvisioningReason,
+			Message: fmt.Sprintf("Instance is %s", inst.Status),
+		})
 	}
 	if err := r.Status().Patch(ctx, machine, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
@@ -148,10 +175,10 @@ func (r *VerdaMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request
 func (r *VerdaMachineReconciler) findOrCreateInstance(ctx context.Context, machine *infrastructurev1alpha1.VerdaMachine) (*verdasdk.Instance, error) {
 	log := logf.FromContext(ctx)
 
-	if machine.Spec.ProviderID != nil && *machine.Spec.ProviderID != "" {
-		id, ok := instanceIDFromProviderID(*machine.Spec.ProviderID)
+	if machine.Spec.ProviderID != "" {
+		id, ok := instanceIDFromProviderID(machine.Spec.ProviderID)
 		if !ok {
-			return nil, fmt.Errorf("providerID %q is not a verda:// provider ID", *machine.Spec.ProviderID)
+			return nil, fmt.Errorf("providerID %q is not a verda:// provider ID", machine.Spec.ProviderID)
 		}
 		inst, err := r.Cloud.GetInstance(ctx, id)
 		if err == nil {
@@ -225,10 +252,10 @@ func (r *VerdaMachineReconciler) reconcileDelete(ctx context.Context, machine *i
 // findInstance locates the backing instance without creating one, for
 // the delete path. It returns nil when there is nothing to delete.
 func (r *VerdaMachineReconciler) findInstance(ctx context.Context, machine *infrastructurev1alpha1.VerdaMachine) (*verdasdk.Instance, error) {
-	if machine.Spec.ProviderID != nil && *machine.Spec.ProviderID != "" {
-		id, ok := instanceIDFromProviderID(*machine.Spec.ProviderID)
+	if machine.Spec.ProviderID != "" {
+		id, ok := instanceIDFromProviderID(machine.Spec.ProviderID)
 		if !ok {
-			return nil, fmt.Errorf("providerID %q is not a verda:// provider ID", *machine.Spec.ProviderID)
+			return nil, fmt.Errorf("providerID %q is not a verda:// provider ID", machine.Spec.ProviderID)
 		}
 		inst, err := r.Cloud.GetInstance(ctx, id)
 		if errors.Is(err, cloud.ErrNotFound) {
@@ -250,11 +277,11 @@ func (r *VerdaMachineReconciler) findInstance(ctx context.Context, machine *infr
 
 func (r *VerdaMachineReconciler) recordProviderID(ctx context.Context, machine *infrastructurev1alpha1.VerdaMachine, inst *verdasdk.Instance) error {
 	pid := providerIDFor(inst)
-	if machine.Spec.ProviderID != nil && *machine.Spec.ProviderID == pid {
+	if machine.Spec.ProviderID == pid {
 		return nil
 	}
 	base := machine.DeepCopy()
-	machine.Spec.ProviderID = &pid
+	machine.Spec.ProviderID = pid
 	if err := r.Patch(ctx, machine, client.MergeFrom(base)); err != nil {
 		return fmt.Errorf("recording providerID: %w", err)
 	}
@@ -299,16 +326,16 @@ func roleFor(machine *infrastructurev1alpha1.VerdaMachine) string {
 	return cloud.RoleWorker
 }
 
-func addressesOf(inst *verdasdk.Instance) []infrastructurev1alpha1.MachineAddress {
-	var out []infrastructurev1alpha1.MachineAddress
+func addressesOf(inst *verdasdk.Instance) []clusterv1.MachineAddress {
+	var out []clusterv1.MachineAddress
 	if inst.IP != nil && *inst.IP != "" {
-		out = append(out, infrastructurev1alpha1.MachineAddress{Type: infrastructurev1alpha1.MachineExternalIP, Address: *inst.IP})
+		out = append(out, clusterv1.MachineAddress{Type: clusterv1.MachineExternalIP, Address: *inst.IP})
 	}
 	if inst.PrivateIP != nil && *inst.PrivateIP != "" {
-		out = append(out, infrastructurev1alpha1.MachineAddress{Type: infrastructurev1alpha1.MachineInternalIP, Address: *inst.PrivateIP})
+		out = append(out, clusterv1.MachineAddress{Type: clusterv1.MachineInternalIP, Address: *inst.PrivateIP})
 	}
 	if inst.Hostname != "" {
-		out = append(out, infrastructurev1alpha1.MachineAddress{Type: infrastructurev1alpha1.MachineHostName, Address: inst.Hostname})
+		out = append(out, clusterv1.MachineAddress{Type: clusterv1.MachineHostName, Address: inst.Hostname})
 	}
 	return out
 }

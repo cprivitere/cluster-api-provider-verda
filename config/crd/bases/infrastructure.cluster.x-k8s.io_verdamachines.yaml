@@ -61,7 +61,8 @@ spec:
                   providerID is the Verda instance this machine manages, in the
                   form verda://<location>/<instance-id>. The controller sets it
                   once the instance exists; on later passes it is the identity
-                  the reconciler trusts.
+                  the reconciler trusts. A plain string, per the Cluster API
+                  v1beta2 contract guidance for infrastructure machines.
                 type: string
               sshKeyIDs:
                 description: |-
@@ -80,18 +81,23 @@ spec:
               addresses:
                 description: addresses are the instance's network addresses.
                 items:
-                  description: |-
-                    MachineAddress is one network address of a machine's instance,
-                    mirroring clusterv1.MachineAddress.
+                  description: MachineAddress contains information for the node's
+                    address.
                   properties:
                     address:
+                      description: address is the machine address.
+                      maxLength: 256
+                      minLength: 1
                       type: string
                     type:
-                      description: |-
-                        MachineAddressType is the kind of a MachineAddress. The values
-                        mirror clusterv1.MachineAddressType; the type is local for now so
-                        the provider does not take the cluster-api dependency until the
-                        Cluster API composition lands.
+                      description: type is the machine address type, one of Hostname,
+                        ExternalIP, InternalIP, ExternalDNS or InternalDNS.
+                      enum:
+                      - Hostname
+                      - ExternalIP
+                      - InternalIP
+                      - ExternalDNS
+                      - InternalDNS
                       type: string
                   required:
                   - address
@@ -171,11 +177,32 @@ spec:
                 description: |-
                   failureMessage is set when the instance reaches a state the
                   operator should know about — currently a spot instance being
-                  discontinued. The machine is not recreated implicitly in that
-                  state; a human decides.
+                  discontinued. It is the human-readable companion to the Ready
+                  condition; the condition is the contract-visible signal.
                 type: string
+              initialization:
+                description: |-
+                  initialization carries the Cluster API v1beta2 contract's
+                  provisioning signal: provisioned flips true once the instance
+                  exists, and core surfaces the providerID and addresses onto
+                  the Machine at the same moment.
+                properties:
+                  provisioned:
+                    description: provisioned reports whether the infrastructure is
+                      provisioned.
+                    type: boolean
+                type: object
+              interruptible:
+                description: |-
+                  interruptible reports whether the backing instance can be
+                  interrupted (a spot instance). Core reflects it onto the
+                  Node as the cluster.x-k8s.io/interruptible label.
+                type: boolean
               ready:
-                description: ready reports whether the instance exists and is running.
+                description: |-
+                  ready reports whether the instance exists and is running.
+                  Kept as a human convenience; the contract signal is
+                  initialization.provisioned.
                 type: boolean
             type: object
         required:

@@ -39,9 +39,34 @@ spec:
           spec:
             description: spec defines the desired state of VerdaCluster
             properties:
-              foo:
-                description: foo is an example field of VerdaCluster. Edit verdacluster_types.go
-                  to remove/update
+              controlPlaneEndpoint:
+                description: |-
+                  controlPlaneEndpoint is the API server endpoint of the
+                  workload cluster. The VerdaCluster controller writes it (the
+                  first control-plane instance's public IP, port 6443); core
+                  copies it onto the Cluster once initialization.provisioned
+                  is set, and KCP/CABPK consume it from there.
+                minProperties: 1
+                properties:
+                  host:
+                    description: host is the hostname on which the API server is serving.
+                    maxLength: 512
+                    minLength: 1
+                    type: string
+                  port:
+                    description: port is the port on which the API server is serving.
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                type: object
+              location:
+                description: |-
+                  location is the Verda location code the cluster's instances
+                  live in. Stated explicitly on purpose: the Verda SDK silently
+                  defaults an empty location to FIN-03, while the instance
+                  families this platform uses (CPU.*, Tesla V100) exist only
+                  in FIN-01.
                 type: string
             type: object
           status:
@@ -116,6 +141,18 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              initialization:
+                description: |-
+                  initialization carries the Cluster API v1beta2 contract's
+                  provisioning signal: provisioned flips true once the
+                  control-plane endpoint is written, and core surfaces the
+                  endpoint onto the Cluster at the same moment.
+                properties:
+                  provisioned:
+                    description: provisioned reports whether the infrastructure is
+                      provisioned.
+                    type: boolean
+                type: object
             type: object
         required:
         - spec
