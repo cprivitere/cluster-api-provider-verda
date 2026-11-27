@@ -26,23 +26,74 @@ import (
 
 // VerdaMachineSpec defines the desired state of VerdaMachine
 type VerdaMachineSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
-
-	// foo is an example field of VerdaMachine. Edit verdamachine_types.go to remove/update
+	// providerID is the Verda instance this machine manages, in the
+	// form verda://<location>/<instance-id>. The controller sets it
+	// once the instance exists; on later passes it is the identity
+	// the reconciler trusts.
 	// +optional
-	Foo *string `json:"foo,omitempty"`
+	ProviderID *string `json:"providerID,omitempty"`
+
+	// instanceType is the Verda instance type, e.g. CPU.4V.16G.
+	InstanceType string `json:"instanceType"`
+
+	// image is the Verda image name, e.g. 26.04.cuda13.4.
+	Image string `json:"image"`
+
+	// location is the Verda location code. Empty means the SDK's
+	// default location.
+	// +optional
+	Location string `json:"location,omitempty"`
+
+	// sshKeyIDs are the UUIDs of SSH keys registered in the Verda
+	// project that should be granted login on the instance.
+	// +optional
+	SSHKeyIDs []string `json:"sshKeyIDs,omitempty"`
+
+	// isSpot requests a spot instance. Spot instances can be
+	// discontinued by Verda; the reconciler surfaces that on the
+	// status instead of silently recreating the machine.
+	// +optional
+	IsSpot bool `json:"isSpot,omitempty"`
+}
+
+// MachineAddressType is the kind of a MachineAddress. The values
+// mirror clusterv1.MachineAddressType; the type is local for now so
+// the provider does not take the cluster-api dependency until the
+// Cluster API composition lands.
+type MachineAddressType string
+
+const (
+	// MachineExternalIP is the instance's public IP address.
+	MachineExternalIP MachineAddressType = "ExternalIP"
+	// MachineInternalIP is the instance's private IP address.
+	MachineInternalIP MachineAddressType = "InternalIP"
+	// MachineHostName is the instance's hostname.
+	MachineHostName MachineAddressType = "Hostname"
+)
+
+// MachineAddress is one network address of a machine's instance,
+// mirroring clusterv1.MachineAddress.
+type MachineAddress struct {
+	Type    MachineAddressType `json:"type"`
+	Address string             `json:"address"`
 }
 
 // VerdaMachineStatus defines the observed state of VerdaMachine.
 type VerdaMachineStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// ready reports whether the instance exists and is running.
+	// +optional
+	Ready bool `json:"ready,omitempty"`
 
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
+	// addresses are the instance's network addresses.
+	// +optional
+	Addresses []MachineAddress `json:"addresses,omitempty"`
+
+	// failureMessage is set when the instance reaches a state the
+	// operator should know about — currently a spot instance being
+	// discontinued. The machine is not recreated implicitly in that
+	// state; a human decides.
+	// +optional
+	FailureMessage *string `json:"failureMessage,omitempty"`
 
 	// conditions represent the current state of the VerdaMachine resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.

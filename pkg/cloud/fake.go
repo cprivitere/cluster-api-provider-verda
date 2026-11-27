@@ -49,6 +49,20 @@ func NewFakeClient() *FakeClient {
 	}
 }
 
+// SetInstanceStatus overrides a stored instance's status. It exists
+// so tests can drive state transitions the real API would produce on
+// its own — spot discontinuation above all.
+func (f *FakeClient) SetInstanceStatus(id, status string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	inst, ok := f.instances[id]
+	if !ok {
+		return fmt.Errorf("%w: instance %s", ErrNotFound, id)
+	}
+	inst.Status = status
+	return nil
+}
+
 func (f *FakeClient) nextID(prefix string) string {
 	f.seq++
 	return fmt.Sprintf("%s-%04d", prefix, f.seq)

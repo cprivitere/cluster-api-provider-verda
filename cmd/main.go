@@ -37,6 +37,7 @@ import (
 
 	infrastructurev1alpha1 "github.com/cprivitere/cluster-api-provider-verda/api/v1alpha1"
 	"github.com/cprivitere/cluster-api-provider-verda/internal/controller"
+	"github.com/cprivitere/cluster-api-provider-verda/pkg/cloud"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -189,9 +190,16 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "verdacluster")
 		os.Exit(1)
 	}
+	cloudClient, err := cloud.NewClientFromEnv()
+	if err != nil {
+		setupLog.Error(err, "Failed to create Verda cloud client")
+		os.Exit(1)
+	}
+
 	if err := (&controller.VerdaMachineReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		Cloud:  cloudClient,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "verdamachine")
 		os.Exit(1)

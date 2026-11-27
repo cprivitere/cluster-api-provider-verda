@@ -6,4 +6,14 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: verdamachine-sample
 spec:
-  # TODO(user): Add fields here
+  # CPU.4V.16G: the cheapest of the older-model CPU instances —
+  # more than sufficient for a demo control plane or worker.
+  instanceType: CPU.4V.16G
+  # Ubuntu 26.04 + CUDA 13.4 (driver baked into the image by Verda).
+  # The kubernetes-1.37.0 variant of this image exists too; the plain
+  # one keeps node setup in the bootstrap script, under our control.
+  image: 26.04.cuda13.4
+  # Empty location = the SDK default.
+  sshKeyIDs:
+    - 375d1304-285c-442e-8418-386038fdfb93 # cprivitere@scampertonix
+    - 2b947249-d106-4b51-b5d7-ede6336020bd # cprivitere@DESKTOP-8635292

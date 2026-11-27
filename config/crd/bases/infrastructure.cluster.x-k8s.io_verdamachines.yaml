@@ -39,14 +39,65 @@ spec:
           spec:
             description: spec defines the desired state of VerdaMachine
             properties:
-              foo:
-                description: foo is an example field of VerdaMachine. Edit verdamachine_types.go
-                  to remove/update
+              image:
+                description: image is the Verda image name, e.g. 26.04.cuda13.4.
                 type: string
+              instanceType:
+                description: instanceType is the Verda instance type, e.g. CPU.4V.16G.
+                type: string
+              isSpot:
+                description: |-
+                  isSpot requests a spot instance. Spot instances can be
+                  discontinued by Verda; the reconciler surfaces that on the
+                  status instead of silently recreating the machine.
+                type: boolean
+              location:
+                description: |-
+                  location is the Verda location code. Empty means the SDK's
+                  default location.
+                type: string
+              providerID:
+                description: |-
+                  providerID is the Verda instance this machine manages, in the
+                  form verda://<location>/<instance-id>. The controller sets it
+                  once the instance exists; on later passes it is the identity
+                  the reconciler trusts.
+                type: string
+              sshKeyIDs:
+                description: |-
+                  sshKeyIDs are the UUIDs of SSH keys registered in the Verda
+                  project that should be granted login on the instance.
+                items:
+                  type: string
+                type: array
+            required:
+            - image
+            - instanceType
             type: object
           status:
             description: status defines the observed state of VerdaMachine
             properties:
+              addresses:
+                description: addresses are the instance's network addresses.
+                items:
+                  description: |-
+                    MachineAddress is one network address of a machine's instance,
+                    mirroring clusterv1.MachineAddress.
+                  properties:
+                    address:
+                      type: string
+                    type:
+                      description: |-
+                        MachineAddressType is the kind of a MachineAddress. The values
+                        mirror clusterv1.MachineAddressType; the type is local for now so
+                        the provider does not take the cluster-api dependency until the
+                        Cluster API composition lands.
+                      type: string
+                  required:
+                  - address
+                  - type
+                  type: object
+                type: array
               conditions:
                 description: |-
                   conditions represent the current state of the VerdaMachine resource.
@@ -116,6 +167,16 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              failureMessage:
+                description: |-
+                  failureMessage is set when the instance reaches a state the
+                  operator should know about — currently a spot instance being
+                  discontinued. The machine is not recreated implicitly in that
+                  state; a human decides.
+                type: string
+              ready:
+                description: ready reports whether the instance exists and is running.
+                type: boolean
             type: object
         required:
         - spec
