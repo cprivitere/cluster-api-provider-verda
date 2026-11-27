@@ -8,6 +8,18 @@ resources:
 - bases/infrastructure.cluster.x-k8s.io_verdamachinetemplates.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
+# Cluster API contract version labels (required by the provider
+# contract, https://cluster-api.sigs.k8s.io/developer/providers/contracts/overview.html#api-version-labels):
+# core resolves ContractVersionedObjectReference apiGroups by reading
+# these labels off the CRDs; the value lists the API versions of this
+# provider that satisfy the named contract. kubebuilder does not
+# scaffold them. This provider serves only v1alpha1, which implements
+# both the v1beta1 and v1beta2 contracts.
+labels:
+- pairs:
+    cluster.x-k8s.io/v1beta1: v1alpha1
+    cluster.x-k8s.io/v1beta2: v1alpha1
+
 patches:
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix.
 # patches here are for enabling the conversion webhook for each CRD
