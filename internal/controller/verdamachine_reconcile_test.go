@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	verdasdk "github.com/verda-cloud/verdacloud-sdk-go/pkg/verda"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -236,6 +237,9 @@ func networkTestReconciler(t *testing.T, cloudClient cloud.Client, objs ...clien
 	if err := clusterv1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme (core): %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme (corev1): %v", err)
+	}
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(objs...).
@@ -267,7 +271,7 @@ func networkTestObjects(machine *infrastructurev1alpha1.VerdaMachine, provisione
 		infraCluster.Status.NetworkID = testNetworkID
 		infraCluster.Status.SubnetID = testSubnetID
 	}
-	return []client.Object{cluster, infraCluster, machine}
+	return []client.Object{cluster, infraCluster, machine, ownerMachine(new(testBootstrapName)), bootstrapSecret("cloud-config")}
 }
 
 func theInstance(t *testing.T, ctx context.Context, cloudClient *cloud.FakeClient) verdasdk.CreateInstanceRequest {
@@ -291,7 +295,7 @@ func theInstance(t *testing.T, ctx context.Context, cloudClient *cloud.FakeClien
 func TestReconcileControlPlanePinsPrivateAddress(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()
-	machine := reconcileTestMachine()
+	machine := ownedTestMachine()
 	machine.Labels = map[string]string{clusterNameLabel: testClusterName, controlPlaneLabel: ""}
 	r := networkTestReconciler(t, cloudClient, networkTestObjects(machine, true)...)
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testMachineName, Namespace: testNamespace}}
@@ -318,7 +322,7 @@ func TestReconcileControlPlanePinsPrivateAddress(t *testing.T) {
 func TestReconcileWorkerStaysOffNetworkByDefault(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()
-	machine := reconcileTestMachine()
+	machine := ownedTestMachine()
 	machine.Labels = map[string]string{clusterNameLabel: testClusterName}
 	r := networkTestReconciler(t, cloudClient, networkTestObjects(machine, true)...)
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testMachineName, Namespace: testNamespace}}
@@ -340,7 +344,7 @@ func TestReconcileWorkerStaysOffNetworkByDefault(t *testing.T) {
 func TestReconcileWorkerJoinsExplicitNetworkFromSpec(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()
-	machine := reconcileTestMachine()
+	machine := ownedTestMachine()
 	machine.Labels = map[string]string{clusterNameLabel: testClusterName}
 	machine.Spec.NetworkID = testNetworkID
 	machine.Spec.SubnetID = testSubnetID
@@ -365,7 +369,7 @@ func TestReconcileWorkerJoinsExplicitNetworkFromSpec(t *testing.T) {
 func TestReconcileWorkerRejectsHalfNamedNetwork(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()
-	machine := reconcileTestMachine()
+	machine := ownedTestMachine()
 	machine.Labels = map[string]string{clusterNameLabel: testClusterName}
 	machine.Spec.NetworkID = testNetworkID
 	r := networkTestReconciler(t, cloudClient, networkTestObjects(machine, true)...)
@@ -389,7 +393,7 @@ func TestReconcileWorkerRejectsHalfNamedNetwork(t *testing.T) {
 func TestReconcileWaitsForClusterNetwork(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()
-	machine := reconcileTestMachine()
+	machine := ownedTestMachine()
 	machine.Labels = map[string]string{clusterNameLabel: testClusterName, controlPlaneLabel: ""}
 	r := networkTestReconciler(t, cloudClient, networkTestObjects(machine, false)...)
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testMachineName, Namespace: testNamespace}}

@@ -316,18 +316,32 @@ var errBootstrapNotReady = errors.New("bootstrap data is not ready yet")
 // holds CABPK's cloud-config, which pkg/bootstrap translates into
 // the bash script Verda's startup mechanism runs.
 //
-// A VerdaMachine with no owner Machine (standalone use) gets no
-// script — bootstrap delivery is a composition feature. An owner
-// whose data is not ready yet yields errBootstrapNotReady: per the
-// contract the Machine stays Pending until CABPK delivers, and
-// creating the instance before that would strand a node that can
-// never join.
+// A VerdaMachine with no owner Machine and no cluster affiliation
+// (standalone use) gets no script — bootstrap delivery is a
+// composition feature. A cluster machine whose owner reference has
+// not landed yet, or an owner whose data is not ready yet, yields
+// errBootstrapNotReady: per the contract the Machine stays Pending
+// until CABPK delivers, and creating the instance before that
+// would strand a node that can never join.
 func (r *VerdaMachineReconciler) bootstrapScript(ctx context.Context, machine *infrastructurev1alpha1.VerdaMachine) (string, error) {
 	owner, err := util.GetOwnerMachine(ctx, r.Client, machine.ObjectMeta)
 	if err != nil {
 		return "", fmt.Errorf("getting owner Machine: %w", err)
 	}
 	if owner == nil {
+		// A machine that belongs to a cluster but has no Machine
+		// owner reference yet is not standalone: KCP creates the
+		// infrastructure machine owned by the KubeadmControlPlane,
+		// and the Machine owner reference arrives afterwards.
+		// Reading "no owner yet" as "standalone" creates the
+		// instance without its bootstrap script — observed live on
+		// Nov 27, 2026, when the first control-plane instance came
+		// up scriptless and kubeadm never ran. Wait for the owner
+		// instead. Only a machine with no cluster affiliation at
+		// all is standalone.
+		if machine.Labels[clusterNameLabel] != "" {
+			return "", errBootstrapNotReady
+		}
 		return "", nil
 	}
 	if owner.Spec.Bootstrap.DataSecretName == nil {

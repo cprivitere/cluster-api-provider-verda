@@ -193,6 +193,38 @@ func TestBootstrapRejectsUnsupportedFormat(t *testing.T) {
 	}
 }
 
+// A cluster machine whose Machine owner reference has not landed
+// yet waits for it instead of creating a scriptless instance: KCP
+// creates the infrastructure machine owned by the
+// KubeadmControlPlane, and the Machine owner reference arrives
+// afterwards. (Observed live Nov 27, 2026: a control-plane
+// instance created with no startup script at all.)
+func TestBootstrapWaitsWhenOwnerMachineNotYetLinked(t *testing.T) {
+	ctx := context.Background()
+	cloudClient := cloud.NewFakeClient()
+	machine := reconcileTestMachine()
+	machine.Labels = map[string]string{clusterNameLabel: testClusterName, controlPlaneLabel: ""}
+	machine.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "controlplane.cluster.x-k8s.io/v1beta2",
+		Kind:       "KubeadmControlPlane",
+		Name:       "test-control-plane",
+		UID:        types.UID("kcp-uid"),
+	}}
+	r := bootstrapTestReconciler(t, cloudClient, machine)
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testMachineName, Namespace: testNamespace}}
+
+	result, err := r.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if result.RequeueAfter != 15*time.Second {
+		t.Errorf("RequeueAfter = %v, want 15s while the Machine owner reference is missing", result.RequeueAfter)
+	}
+	if n := instanceCount(t, ctx, cloudClient); n != 0 {
+		t.Errorf("cloud has %d instances, want 0 (no scriptless create before the owner lands)", n)
+	}
+}
+
 func TestStandaloneMachineGetsNoScript(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()

@@ -41,14 +41,14 @@ const nodeTestIP = "203.0.113.10"
 // cluster-name label core Cluster API sets, which is how the node
 // step finds its workload cluster.
 func labeledTestMachine() *infrastructurev1alpha1.VerdaMachine {
-	machine := reconcileTestMachine()
+	machine := ownedTestMachine()
 	machine.Labels = map[string]string{clusterv1.ClusterNameLabel: testClusterName}
 	return machine
 }
 
 func nodeTestReconciler(t *testing.T, cloudClient cloud.Client, workloadClient client.Client, machine *infrastructurev1alpha1.VerdaMachine) *VerdaMachineReconciler {
 	t.Helper()
-	r := bootstrapTestReconciler(t, cloudClient, machine)
+	r := bootstrapTestReconciler(t, cloudClient, machine, ownerMachine(new(testBootstrapName)), bootstrapSecret("cloud-config"))
 	r.ClusterCache = clustercache.NewFakeClusterCache(workloadClient,
 		client.ObjectKey{Namespace: testNamespace, Name: testClusterName})
 	return r
@@ -242,7 +242,7 @@ func TestNodeUUIDMatchWinsOverIPMatch(t *testing.T) {
 func TestNodeStepSkippedWithoutClusterCache(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()
-	r := bootstrapTestReconciler(t, cloudClient, labeledTestMachine())
+	r := bootstrapTestReconciler(t, cloudClient, labeledTestMachine(), ownerMachine(new(testBootstrapName)), bootstrapSecret("cloud-config"))
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testMachineName, Namespace: testNamespace}}
 
 	result, err := r.Reconcile(ctx, req)
