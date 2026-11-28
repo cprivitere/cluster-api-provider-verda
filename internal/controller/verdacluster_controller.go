@@ -20,17 +20,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
-	"strings"
 	"time"
 
 	verdasdk "github.com/verda-cloud/verdacloud-sdk-go/pkg/verda"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	controlplanev1beta2 "sigs.k8s.io/cluster-api/api/controlplane/kubeadm/v1beta2"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	infrastructurev1alpha1 "github.com/cprivitere/cluster-api-provider-verda/api/v1alpha1"
@@ -41,16 +42,68 @@ import (
 // serves on — kubeadm's default, and the port KCP advertises.
 const controlPlanePort = 6443
 
-// VerdaClusterReconciler reconciles a VerdaCluster object. The
-// cluster object creates no cloud resources of its own — instances
-// belong to VerdaMachines — so its whole job is the Cluster API
-// contract's cluster-level signal: once a control-plane instance is
-// running with a public IP, publish that address as the control
-// plane endpoint and mark initialization provisioned. Core copies
-// the endpoint onto the Cluster at that moment, and KCP/CABPK
-// consume it from there. With no load balancer in the Verda
-// instance API, the first control-plane instance's address is the
-// endpoint.
+// verdaClusterFinalizer guards the cloud resources this controller
+// creates (private network, subnet, endpoint proxy): the
+// VerdaCluster cannot disappear until they have been deleted.
+const verdaClusterFinalizer = "infrastructure.cluster.x-k8s.io/verdacluster"
+
+// The endpoint proxy's shape. It only forwards TCP, so the smallest
+// instance family the private-network location offers is plenty;
+// it runs the nodes' image so the platform has one image to reason
+// about.
+const (
+	proxyInstanceType = "CPU-TURIN.4V.16G"
+	proxyImage        = "26.04.cuda13.4"
+)
+
+// proxyStartupScript installs HAProxy as a TCP passthrough for the
+// API server: listen on 6443, forward to the control-plane
+// instance's private address (the %s). The address is a provider
+// constant (see pkg/cloud), so the configuration is complete before
+// the control plane exists. Verda runs the script as root at the
+// end of cloud-init.
+const proxyStartupScript = `#!/bin/bash
+# CAPVE endpoint proxy: HAProxy in TCP passthrough mode, forwarding
+# 6443 to the control-plane instance's private address.
+apt-get update
+apt-get install -y haproxy
+cat > /etc/haproxy/haproxy.cfg <<'HAPROXY_EOF'
+global
+    maxconn 2048
+
+defaults
+    mode tcp
+    timeout connect 5s
+    timeout client 60s
+    timeout server 60s
+
+frontend k8s-api
+    bind :6443
+    default_backend k8s-control-plane
+
+backend k8s-control-plane
+    server control-plane %s:6443
+HAPROXY_EOF
+systemctl enable --now haproxy
+`
+
+// VerdaClusterReconciler reconciles a VerdaCluster object.
+//
+// The Cluster API contract requires a valid control-plane endpoint
+// on the Cluster before KCP creates any Machine and before CABPK
+// generates any bootstrap data. Verda has no load balancer and no
+// reservable public addresses, so the endpoint cannot come from
+// the control-plane instance itself — its address only exists once
+// it does. This controller therefore builds the endpoint first: a
+// private network and subnet for the cluster's nodes, plus a small
+// dedicated proxy instance on that subnet whose public address
+// becomes the endpoint. The proxy forwards to the control plane's
+// pinned private address (see pkg/cloud), so its configuration is
+// static and complete before the control plane exists. Once the
+// proxy is running, the controller publishes its address as the
+// endpoint and marks initialization provisioned; core copies the
+// endpoint onto the Cluster and the ordinary machine flow takes
+// over from there.
 type VerdaClusterReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -62,6 +115,10 @@ type VerdaClusterReconciler struct {
 
 // +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=verdaclusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=verdaclusters/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=verdaclusters/finalizers,verbs=update
+// +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=verdamachinetemplates,verbs=get;list;watch
+// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters,verbs=get;list;watch
+// +kubebuilder:rbac:groups=controlplane.cluster.x-k8s.io,resources=kubeadmcontrolplanes,verbs=get;list;watch
 
 func (r *VerdaClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -79,31 +136,51 @@ func (r *VerdaClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	if !cluster.DeletionTimestamp.IsZero() {
-		// This controller creates nothing in the cloud, so there is
-		// nothing to clean up — and it never adds a finalizer.
-		return ctrl.Result{}, nil
+		return r.reconcileDelete(ctx, cluster)
 	}
 
-	inst, err := r.findControlPlaneInstance(ctx, cluster)
+	if !controllerutil.ContainsFinalizer(cluster, verdaClusterFinalizer) {
+		base := cluster.DeepCopy()
+		controllerutil.AddFinalizer(cluster, verdaClusterFinalizer)
+		if err := r.Patch(ctx, cluster, client.MergeFrom(base)); err != nil {
+			return ctrl.Result{}, fmt.Errorf("adding finalizer: %w", err)
+		}
+	}
+
+	networkID, subnetID, err := r.ensureNetwork(ctx, cluster)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if inst == nil {
-		// Nothing watches the cloud side, so poll while the control
-		// plane is still coming up (the machine controller polls the
+	if cluster.Status.NetworkID != networkID || cluster.Status.SubnetID != subnetID {
+		base := cluster.DeepCopy()
+		cluster.Status.NetworkID = networkID
+		cluster.Status.SubnetID = subnetID
+		if err := r.Status().Patch(ctx, cluster, client.MergeFrom(base)); err != nil {
+			return ctrl.Result{}, fmt.Errorf("recording network in status: %w", err)
+		}
+		log.Info("Recorded cluster network in status", "networkID", networkID, "subnetID", subnetID)
+	}
+
+	proxy, err := r.ensureProxy(ctx, cluster, networkID, subnetID)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if proxy.Status != "running" || proxy.IP == nil || *proxy.IP == "" {
+		// Nothing watches the cloud side, so poll while the proxy
+		// is still coming up (the machine controller polls the
 		// same way).
-		log.Info("No running control-plane instance yet")
+		log.Info("Endpoint proxy is not ready yet", "instanceID", proxy.ID, "status", proxy.Status)
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 
-	endpoint := clusterv1.APIEndpoint{Host: *inst.IP, Port: controlPlanePort}
+	endpoint := clusterv1.APIEndpoint{Host: *proxy.IP, Port: controlPlanePort}
 	if cluster.Spec.ControlPlaneEndpoint != endpoint {
 		base := cluster.DeepCopy()
 		cluster.Spec.ControlPlaneEndpoint = endpoint
 		if err := r.Patch(ctx, cluster, client.MergeFrom(base)); err != nil {
 			return ctrl.Result{}, fmt.Errorf("writing control plane endpoint: %w", err)
 		}
-		log.Info("Wrote control plane endpoint", "host", endpoint.Host, "port", endpoint.Port, "instanceID", inst.ID)
+		log.Info("Wrote control plane endpoint", "host", endpoint.Host, "port", endpoint.Port, "proxyInstanceID", proxy.ID)
 	}
 
 	if !ptr.Deref(cluster.Status.Initialization.Provisioned, false) {
@@ -114,32 +191,200 @@ func (r *VerdaClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		// Name the success transition, as the machine controller
 		// does: silence at exactly this moment reads like a stall.
-		log.Info("Cluster infrastructure is provisioned", "instanceID", inst.ID)
+		log.Info("Cluster infrastructure is provisioned", "proxyInstanceID", proxy.ID)
 	}
 	return ctrl.Result{}, nil
 }
 
-// findControlPlaneInstance returns the cluster's endpoint candidate:
-// among the instances carrying this cluster's identity tags with the
-// control-plane role, the first (by instance ID, so the choice is
-// stable) that is running and has a public IP. It returns nil when
-// no instance qualifies yet.
-func (r *VerdaClusterReconciler) findControlPlaneInstance(ctx context.Context, cluster *infrastructurev1alpha1.VerdaCluster) (*verdasdk.Instance, error) {
+// reconcileDelete removes what the controller created — the proxy
+// instance first (it holds an address on the subnet), then the
+// subnet and the network — and releases the finalizer. Lookups are
+// by name and tag rather than by status, so cleanup still works if
+// a status write was lost.
+func (r *VerdaClusterReconciler) reconcileDelete(ctx context.Context, cluster *infrastructurev1alpha1.VerdaCluster) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	if !controllerutil.ContainsFinalizer(cluster, verdaClusterFinalizer) {
+		return ctrl.Result{}, nil
+	}
+
+	proxies, err := r.Cloud.FindInstancesByTags(ctx, map[string]string{
+		cloud.TagClusterName: clusterKeyFor(cluster),
+		cloud.TagRole:        cloud.RoleEndpointProxy,
+	})
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	for i := range proxies {
+		if err := r.Cloud.DeleteInstanceWithVolumes(ctx, proxies[i].ID); err != nil {
+			return ctrl.Result{}, fmt.Errorf("deleting endpoint proxy: %w", err)
+		}
+		log.Info("Deleted endpoint proxy", "instanceID", proxies[i].ID)
+	}
+
+	network, err := r.findNetwork(ctx, cluster)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if network != nil {
+		subnets, err := r.Cloud.ListSubnets(ctx, network.ID)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		for i := range subnets {
+			if err := r.Cloud.DeleteSubnet(ctx, network.ID, subnets[i].ID); err != nil && !errors.Is(err, cloud.ErrNotFound) {
+				return ctrl.Result{}, fmt.Errorf("deleting subnet: %w", err)
+			}
+		}
+		if err := r.Cloud.DeletePrivateNetwork(ctx, network.ID); err != nil && !errors.Is(err, cloud.ErrNotFound) {
+			return ctrl.Result{}, fmt.Errorf("deleting private network: %w", err)
+		}
+		log.Info("Deleted cluster network", "networkID", network.ID)
+	}
+
+	base := cluster.DeepCopy()
+	controllerutil.RemoveFinalizer(cluster, verdaClusterFinalizer)
+	if err := r.Patch(ctx, cluster, client.MergeFrom(base)); err != nil {
+		return ctrl.Result{}, fmt.Errorf("removing finalizer: %w", err)
+	}
+	return ctrl.Result{}, nil
+}
+
+// ensureNetwork finds or creates the cluster's private network and
+// its node subnet in the cluster's location, and returns their IDs.
+func (r *VerdaClusterReconciler) ensureNetwork(ctx context.Context, cluster *infrastructurev1alpha1.VerdaCluster) (string, string, error) {
+	log := logf.FromContext(ctx)
+
+	network, err := r.findNetwork(ctx, cluster)
+	if err != nil {
+		return "", "", err
+	}
+	if network == nil {
+		network, err = r.Cloud.CreatePrivateNetwork(ctx, verdasdk.CreatePrivateNetworkRequest{
+			Name: networkNameFor(cluster),
+			Mode: verdasdk.NetworkModeCustom,
+		})
+		if err != nil {
+			return "", "", fmt.Errorf("creating private network: %w", err)
+		}
+		log.Info("Created private network", "networkID", network.ID, "name", network.Name)
+	}
+
+	subnets, err := r.Cloud.ListSubnets(ctx, network.ID)
+	if err != nil {
+		return "", "", err
+	}
+	for i := range subnets {
+		if subnets[i].Location.Code == cluster.Spec.Location && subnets[i].CIDR == cloud.SubnetCIDR {
+			return network.ID, subnets[i].ID, nil
+		}
+	}
+	subnet, err := r.Cloud.CreateSubnet(ctx, network.ID, verdasdk.CreateSubnetRequest{
+		LocationCode: cluster.Spec.Location,
+		Name:         "nodes",
+		CIDR:         cloud.SubnetCIDR,
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("creating subnet: %w", err)
+	}
+	log.Info("Created subnet", "networkID", network.ID, "subnetID", subnet.ID, "cidr", subnet.CIDR)
+	return network.ID, subnet.ID, nil
+}
+
+// findNetwork returns the cluster's private network, identified by
+// its deterministic name, or nil when it does not exist yet.
+func (r *VerdaClusterReconciler) findNetwork(ctx context.Context, cluster *infrastructurev1alpha1.VerdaCluster) (*verdasdk.PrivateNetwork, error) {
+	networks, err := r.Cloud.ListPrivateNetworks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range networks {
+		if networks[i].Name == networkNameFor(cluster) {
+			return &networks[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// ensureProxy finds or creates the cluster's endpoint proxy
+// instance on the cluster's subnet.
+func (r *VerdaClusterReconciler) ensureProxy(ctx context.Context, cluster *infrastructurev1alpha1.VerdaCluster, networkID, subnetID string) (*verdasdk.Instance, error) {
+	log := logf.FromContext(ctx)
+
 	found, err := r.Cloud.FindInstancesByTags(ctx, map[string]string{
 		cloud.TagClusterName: clusterKeyFor(cluster),
-		cloud.TagRole:        cloud.RoleControlPlane,
+		cloud.TagRole:        cloud.RoleEndpointProxy,
 	})
 	if err != nil {
 		return nil, err
 	}
-	slices.SortFunc(found, func(a, b verdasdk.Instance) int { return strings.Compare(a.ID, b.ID) })
-	for i := range found {
-		inst := &found[i]
-		if inst.Status == "running" && inst.IP != nil && *inst.IP != "" {
-			return inst, nil
-		}
+	if len(found) > 0 {
+		return &found[0], nil
 	}
-	return nil, nil
+
+	private, err := verdasdk.IPAllocIPv4(cloud.ProxyPrivateIP)
+	if err != nil {
+		return nil, fmt.Errorf("proxy private address: %w", err)
+	}
+	public := verdasdk.IPAllocAuto
+	inst, err := r.Cloud.CreateInstance(ctx, verdasdk.CreateInstanceRequest{
+		InstanceType:  proxyInstanceType,
+		Image:         proxyImage,
+		LocationCode:  cluster.Spec.Location,
+		Hostname:      cluster.Name + "-proxy",
+		SSHKeyIDs:     r.controlPlaneSSHKeyIDs(ctx, cluster),
+		Network:       networkID,
+		Subnet:        subnetID,
+		PrivateIP:     &private,
+		PublicIP:      &public,
+		StartupScript: fmt.Sprintf(proxyStartupScript, cloud.ControlPlanePrivateIP),
+		Tags:          cloud.MachineTags(clusterKeyFor(cluster), clusterKeyFor(cluster), cloud.RoleEndpointProxy),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating endpoint proxy: %w", err)
+	}
+	log.Info("Created endpoint proxy", "instanceID", inst.ID)
+	return inst, nil
+}
+
+// controlPlaneSSHKeyIDs returns the SSH keys of the cluster's
+// control-plane machine template, so the proxy — the one instance
+// an operator may need to log into when the API is unreachable —
+// accepts the same keys as the control plane it fronts. The lookup
+// is best-effort: any missing link yields no keys rather than
+// blocking the endpoint.
+func (r *VerdaClusterReconciler) controlPlaneSSHKeyIDs(ctx context.Context, cluster *infrastructurev1alpha1.VerdaCluster) []string {
+	clusterName := cluster.Labels[clusterNameLabel]
+	if clusterName == "" {
+		clusterName = cluster.Name
+	}
+	owner := &clusterv1.Cluster{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: clusterName}, owner); err != nil {
+		return nil
+	}
+	if owner.Spec.ControlPlaneRef.Name == "" {
+		return nil
+	}
+	controlPlane := &controlplanev1beta2.KubeadmControlPlane{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: owner.Spec.ControlPlaneRef.Name}, controlPlane); err != nil {
+		return nil
+	}
+	templateName := controlPlane.Spec.MachineTemplate.Spec.InfrastructureRef.Name
+	if templateName == "" {
+		return nil
+	}
+	template := &infrastructurev1alpha1.VerdaMachineTemplate{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: templateName}, template); err != nil {
+		return nil
+	}
+	return template.Spec.Template.Spec.SSHKeyIDs
+}
+
+// networkNameFor is the cluster's private network name. Networks
+// are project-global and carry no tags, so the name is the identity
+// find-or-create and cleanup both look up.
+func networkNameFor(cluster *infrastructurev1alpha1.VerdaCluster) string {
+	return "capve-" + cluster.Namespace + "-" + cluster.Name
 }
 
 // clusterKeyFor renders the capve.cluster tag value the machine

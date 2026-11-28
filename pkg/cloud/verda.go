@@ -158,3 +158,43 @@ func (c *verdaClient) GetStartupScript(ctx context.Context, id string) (*verda.S
 func (c *verdaClient) DeleteStartupScript(ctx context.Context, id string) error {
 	return c.sdk.StartupScripts.DeleteStartupScript(ctx, id)
 }
+
+func (c *verdaClient) ListPrivateNetworks(ctx context.Context) ([]verda.PrivateNetwork, error) {
+	return c.sdk.PrivateNetworks.Get(ctx)
+}
+
+func (c *verdaClient) CreatePrivateNetwork(
+	ctx context.Context, req verda.CreatePrivateNetworkRequest,
+) (*verda.PrivateNetwork, error) {
+	return c.sdk.PrivateNetworks.Create(ctx, req)
+}
+
+func (c *verdaClient) DeletePrivateNetwork(ctx context.Context, id string) error {
+	if err := c.sdk.PrivateNetworks.Delete(ctx, id); err != nil {
+		if isNotFoundError(err) {
+			return fmt.Errorf("%w: private network %s", ErrNotFound, id)
+		}
+		return err
+	}
+	return nil
+}
+
+func (c *verdaClient) ListSubnets(ctx context.Context, networkID string) ([]verda.Subnet, error) {
+	return c.sdk.PrivateNetworks.GetSubnets(ctx, networkID)
+}
+
+func (c *verdaClient) CreateSubnet(
+	ctx context.Context, networkID string, req verda.CreateSubnetRequest,
+) (*verda.Subnet, error) {
+	return c.sdk.PrivateNetworks.CreateSubnet(ctx, networkID, req)
+}
+
+func (c *verdaClient) DeleteSubnet(ctx context.Context, networkID, subnetID string) error {
+	if err := c.sdk.PrivateNetworks.DeleteSubnet(ctx, networkID, subnetID); err != nil {
+		if isNotFoundError(err) {
+			return fmt.Errorf("%w: subnet %s", ErrNotFound, subnetID)
+		}
+		return err
+	}
+	return nil
+}

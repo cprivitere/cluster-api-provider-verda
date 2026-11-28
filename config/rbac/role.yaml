@@ -22,6 +22,14 @@ rules:
   - list
   - watch
 - apiGroups:
+  - controlplane.cluster.x-k8s.io
+  resources:
+  - kubeadmcontrolplanes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - infrastructure.cluster.x-k8s.io
   resources:
   - verdaclusters
@@ -37,6 +45,13 @@ rules:
 - apiGroups:
   - infrastructure.cluster.x-k8s.io
   resources:
+  - verdaclusters/finalizers
+  - verdamachines/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - infrastructure.cluster.x-k8s.io
+  resources:
   - verdaclusters/status
   - verdamachines/status
   verbs:
@@ -46,6 +61,8 @@ rules:
 - apiGroups:
   - infrastructure.cluster.x-k8s.io
   resources:
-  - verdamachines/finalizers
+  - verdamachinetemplates
   verbs:
-  - update
+  - get
+  - list
+  - watch

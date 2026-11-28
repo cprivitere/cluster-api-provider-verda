@@ -42,8 +42,24 @@ const (
 
 // Role values for TagRole.
 const (
-	RoleControlPlane = "control-plane"
-	RoleWorker       = "worker"
+	RoleControlPlane  = "control-plane"
+	RoleWorker        = "worker"
+	RoleEndpointProxy = "endpoint-proxy"
+)
+
+// Addressing on the private network the cluster controller creates
+// for each cluster. The subnet is small and fixed on purpose: the
+// only address that must be known before it exists is the control
+// plane's, because the endpoint proxy's configuration points at it.
+// Everything else takes an automatic address.
+const (
+	// SubnetCIDR is the CIDR of the cluster's node subnet.
+	SubnetCIDR = "10.0.0.0/24"
+	// ProxyPrivateIP is the endpoint proxy's address on the subnet.
+	ProxyPrivateIP = "10.0.0.2"
+	// ControlPlanePrivateIP is the control-plane instance's address
+	// on the subnet — the proxy's one backend.
+	ControlPlanePrivateIP = "10.0.0.10"
 )
 
 // MachineTags returns the identity tags for one machine's instance.

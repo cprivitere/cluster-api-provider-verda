@@ -39,8 +39,8 @@ type InitializationStatus struct {
 // VerdaClusterSpec defines the desired state of VerdaCluster
 type VerdaClusterSpec struct {
 	// controlPlaneEndpoint is the API server endpoint of the
-	// workload cluster. The VerdaCluster controller writes it (the
-	// first control-plane instance's public IP, port 6443); core
+	// workload cluster. The VerdaCluster controller writes it:
+	// the endpoint proxy instance's public IP, port 6443. Core
 	// copies it onto the Cluster once initialization.provisioned
 	// is set, and KCP/CABPK consume it from there.
 	// +optional
@@ -57,6 +57,18 @@ type VerdaClusterSpec struct {
 
 // VerdaClusterStatus defines the observed state of VerdaCluster.
 type VerdaClusterStatus struct {
+	// networkID is the Verda private network the controller created
+	// for this cluster, and subnetID its node subnet in the
+	// cluster's location. The machine controller reads them to
+	// attach instances to the network; both stay empty until the
+	// network exists.
+	// +optional
+	NetworkID string `json:"networkID,omitempty"`
+
+	// subnetID is the node subnet's ID; see networkID.
+	// +optional
+	SubnetID string `json:"subnetID,omitempty"`
+
 	// initialization carries the Cluster API v1beta2 contract's
 	// provisioning signal: provisioned flips true once the
 	// control-plane endpoint is written, and core surfaces the

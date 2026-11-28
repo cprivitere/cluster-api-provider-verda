@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/verda-cloud/verdacloud-sdk-go/pkg/verda"
@@ -35,12 +36,20 @@ type FakeClient struct {
 	mu        sync.Mutex
 	instances map[string]*verda.Instance
 	scripts   map[string]*verda.StartupScript
+	networks  map[string]*verda.PrivateNetwork
+	subnets   map[string]map[string]*verda.Subnet
 	// inlineScripts records the inline startup script each instance
 	// was created with, keyed by instance ID. The SDK's Instance
 	// type does not echo the script back (only a script ID), so
 	// tests need this side channel to see what was delivered.
 	inlineScripts map[string]string
-	seq           int
+	// createRequests records the full create request of each
+	// instance, keyed by instance ID, so tests can assert on the
+	// parts of a request the Instance type does not echo back
+	// (network attachment and IP allocations above all).
+	createRequests map[string]verda.CreateInstanceRequest
+	seq            int
+	ipSeq          int
 
 	Err error
 }
@@ -50,9 +59,12 @@ var _ Client = (*FakeClient)(nil)
 // NewFakeClient returns an empty FakeClient.
 func NewFakeClient() *FakeClient {
 	return &FakeClient{
-		instances:     make(map[string]*verda.Instance),
-		scripts:       make(map[string]*verda.StartupScript),
-		inlineScripts: make(map[string]string),
+		instances:      make(map[string]*verda.Instance),
+		scripts:        make(map[string]*verda.StartupScript),
+		networks:       make(map[string]*verda.PrivateNetwork),
+		subnets:        make(map[string]map[string]*verda.Subnet),
+		inlineScripts:  make(map[string]string),
+		createRequests: make(map[string]verda.CreateInstanceRequest),
 	}
 }
 
@@ -115,14 +127,45 @@ func (f *FakeClient) CreateInstance(_ context.Context, req verda.CreateInstanceR
 		StartupScriptID: req.StartupScriptID,
 		IsSpot:          req.IsSpot,
 	}
+	// Network attachment and IP allocations, as the real API would
+	// apply them: a literal private address is assigned verbatim,
+	// and an automatic public allocation yields an address from the
+	// documentation range.
+	if req.Network != "" {
+		networkID := req.Network
+		inst.PrivateNetworkID = &networkID
+	}
+	if req.Subnet != "" {
+		subnetID := req.Subnet
+		inst.SubnetID = &subnetID
+	}
+	if req.PrivateIP != nil && *req.PrivateIP != verda.IPAllocAuto && *req.PrivateIP != verda.IPAllocNone {
+		privateIP := string(*req.PrivateIP)
+		inst.PrivateIP = &privateIP
+	}
+	if req.PublicIP != nil && *req.PublicIP == verda.IPAllocAuto {
+		f.ipSeq++
+		publicIP := fmt.Sprintf("203.0.113.%d", 100+f.ipSeq)
+		inst.IP = &publicIP
+	}
 	for _, t := range req.Tags {
 		inst.Tags = append(inst.Tags, verda.Tag{Key: t.Key, Value: t.Value})
 	}
 	f.instances[inst.ID] = inst
+	f.createRequests[inst.ID] = req
 	if req.StartupScript != "" {
 		f.inlineScripts[inst.ID] = req.StartupScript
 	}
 	return copyInstance(inst), nil
+}
+
+// CreateRequestFor returns the create request the instance with the
+// given ID was created with.
+func (f *FakeClient) CreateRequestFor(id string) (verda.CreateInstanceRequest, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	req, ok := f.createRequests[id]
+	return req, ok
 }
 
 func (f *FakeClient) GetInstance(_ context.Context, id string) (*verda.Instance, error) {
@@ -234,4 +277,110 @@ func copyInstance(inst *verda.Instance) *verda.Instance {
 	cp.Tags = append([]verda.Tag(nil), inst.Tags...)
 	cp.VolumeIDs = append([]string(nil), inst.VolumeIDs...)
 	return &cp
+}
+
+func (f *FakeClient) ListPrivateNetworks(_ context.Context) ([]verda.PrivateNetwork, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Err != nil {
+		return nil, f.Err
+	}
+	out := []verda.PrivateNetwork{}
+	for _, network := range f.networks {
+		out = append(out, *network)
+	}
+	slices.SortFunc(out, func(a, b verda.PrivateNetwork) int {
+		return slices.Compare([]string{a.ID}, []string{b.ID})
+	})
+	return out, nil
+}
+
+func (f *FakeClient) CreatePrivateNetwork(
+	_ context.Context, req verda.CreatePrivateNetworkRequest,
+) (*verda.PrivateNetwork, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Err != nil {
+		return nil, f.Err
+	}
+	network := &verda.PrivateNetwork{
+		ID:        f.nextID("network"),
+		Name:      req.Name,
+		Mode:      req.Mode,
+		IsDefault: req.IsDefault,
+	}
+	f.networks[network.ID] = network
+	cp := *network
+	return &cp, nil
+}
+
+func (f *FakeClient) DeletePrivateNetwork(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Err != nil {
+		return f.Err
+	}
+	if _, ok := f.networks[id]; !ok {
+		return fmt.Errorf("%w: private network %s", ErrNotFound, id)
+	}
+	delete(f.networks, id)
+	delete(f.subnets, id)
+	return nil
+}
+
+func (f *FakeClient) ListSubnets(_ context.Context, networkID string) ([]verda.Subnet, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Err != nil {
+		return nil, f.Err
+	}
+	if _, ok := f.networks[networkID]; !ok {
+		return nil, fmt.Errorf("%w: private network %s", ErrNotFound, networkID)
+	}
+	out := []verda.Subnet{}
+	for _, subnet := range f.subnets[networkID] {
+		out = append(out, *subnet)
+	}
+	slices.SortFunc(out, func(a, b verda.Subnet) int {
+		return slices.Compare([]string{a.ID}, []string{b.ID})
+	})
+	return out, nil
+}
+
+func (f *FakeClient) CreateSubnet(
+	_ context.Context, networkID string, req verda.CreateSubnetRequest,
+) (*verda.Subnet, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Err != nil {
+		return nil, f.Err
+	}
+	if _, ok := f.networks[networkID]; !ok {
+		return nil, fmt.Errorf("%w: private network %s", ErrNotFound, networkID)
+	}
+	subnet := &verda.Subnet{
+		ID:       f.nextID("subnet"),
+		Location: verda.Location{Code: req.LocationCode},
+		Name:     req.Name,
+		CIDR:     req.CIDR,
+	}
+	if f.subnets[networkID] == nil {
+		f.subnets[networkID] = make(map[string]*verda.Subnet)
+	}
+	f.subnets[networkID][subnet.ID] = subnet
+	cp := *subnet
+	return &cp, nil
+}
+
+func (f *FakeClient) DeleteSubnet(_ context.Context, networkID, subnetID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Err != nil {
+		return f.Err
+	}
+	if _, ok := f.subnets[networkID][subnetID]; !ok {
+		return fmt.Errorf("%w: subnet %s", ErrNotFound, subnetID)
+	}
+	delete(f.subnets[networkID], subnetID)
+	return nil
 }

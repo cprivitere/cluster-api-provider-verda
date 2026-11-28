@@ -82,6 +82,7 @@ type VerdaMachineReconciler struct {
 // +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=verdamachines/finalizers,verbs=update
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machines,verbs=get;list;watch
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters,verbs=get;list;watch
+// +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=verdaclusters,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
 func (r *VerdaMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -254,7 +255,7 @@ func (r *VerdaMachineReconciler) findOrCreateInstance(ctx context.Context, machi
 		return nil, err
 	}
 
-	inst, err := r.Cloud.CreateInstance(ctx, verdasdk.CreateInstanceRequest{
+	createReq := verdasdk.CreateInstanceRequest{
 		InstanceType:  machine.Spec.InstanceType,
 		Image:         machine.Spec.Image,
 		LocationCode:  machine.Spec.Location,
@@ -263,7 +264,37 @@ func (r *VerdaMachineReconciler) findOrCreateInstance(ctx context.Context, machi
 		Hostname:      machine.Name,
 		StartupScript: script,
 		Tags:          cloud.MachineTags(clusterNameFor(machine), machine.Namespace+"/"+machine.Name, roleFor(machine)),
-	})
+	}
+
+	// Instances of a cluster join its private network (the cluster
+	// controller creates the network and records it in the
+	// VerdaCluster status). The control plane takes the pinned
+	// private address the endpoint proxy forwards to; every other
+	// node takes an automatic address. The API requires the private
+	// and public allocations to be set together, so the public side
+	// asks for automatic alongside. A standalone machine has no
+	// cluster network and keeps the platform default placement.
+	networkID, subnetID, err := r.clusterAttachment(ctx, machine)
+	if err != nil {
+		return nil, err
+	}
+	if networkID != "" {
+		private := verdasdk.IPAllocAuto
+		if roleFor(machine) == cloud.RoleControlPlane {
+			pinned, err := verdasdk.IPAllocIPv4(cloud.ControlPlanePrivateIP)
+			if err != nil {
+				return nil, fmt.Errorf("control plane private address: %w", err)
+			}
+			private = pinned
+		}
+		public := verdasdk.IPAllocAuto
+		createReq.Network = networkID
+		createReq.Subnet = subnetID
+		createReq.PrivateIP = &private
+		createReq.PublicIP = &public
+	}
+
+	inst, err := r.Cloud.CreateInstance(ctx, createReq)
 	if err != nil {
 		return nil, fmt.Errorf("creating instance: %w", err)
 	}
@@ -523,6 +554,43 @@ func clusterNameFor(machine *infrastructurev1alpha1.VerdaMachine) string {
 		return machine.Namespace + "/" + name
 	}
 	return machine.Namespace + "/" + machine.Name
+}
+
+// clusterAttachment returns the private network and subnet IDs the
+// machine's instance attaches to, recorded in the VerdaCluster
+// status by the cluster controller. A standalone machine (no
+// cluster-name label, no Cluster, or no infrastructure reference)
+// gets empty strings and the platform default placement. A cluster
+// whose network is not recorded yet is an error rather than an
+// off-network create the instance would be stranded on, so the
+// reconcile retries until the cluster controller has provisioned
+// the network.
+func (r *VerdaMachineReconciler) clusterAttachment(ctx context.Context, machine *infrastructurev1alpha1.VerdaMachine) (string, string, error) {
+	clusterName := machine.Labels[clusterNameLabel]
+	if clusterName == "" {
+		return "", "", nil
+	}
+	cluster := &clusterv1.Cluster{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: machine.Namespace, Name: clusterName}, cluster); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", "", nil
+		}
+		return "", "", fmt.Errorf("reading cluster: %w", err)
+	}
+	if cluster.Spec.InfrastructureRef.Name == "" {
+		return "", "", nil
+	}
+	infraCluster := &infrastructurev1alpha1.VerdaCluster{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: machine.Namespace, Name: cluster.Spec.InfrastructureRef.Name}, infraCluster); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", "", nil
+		}
+		return "", "", fmt.Errorf("reading infrastructure cluster: %w", err)
+	}
+	if infraCluster.Status.NetworkID == "" || infraCluster.Status.SubnetID == "" {
+		return "", "", fmt.Errorf("cluster %s network is not provisioned yet", clusterName)
+	}
+	return infraCluster.Status.NetworkID, infraCluster.Status.SubnetID, nil
 }
 
 // roleFor reads the control-plane label the way Cluster API marks

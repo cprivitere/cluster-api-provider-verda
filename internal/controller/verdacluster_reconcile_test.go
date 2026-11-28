@@ -18,10 +18,10 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
-	"time"
 
-	verdasdk "github.com/verda-cloud/verdacloud-sdk-go/pkg/verda"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -58,27 +58,6 @@ func clusterTestReconciler(t *testing.T, cloudClient cloud.Client, objs ...clien
 	return &VerdaClusterReconciler{Client: c, Scheme: scheme, Cloud: cloudClient}
 }
 
-// seedInstance creates one instance in the fake cloud with this
-// cluster's identity tags, as the machine controller would have.
-func seedInstance(t *testing.T, ctx context.Context, cloudClient *cloud.FakeClient, role, ip string) *verdasdk.Instance {
-	t.Helper()
-	inst, err := cloudClient.CreateInstance(ctx, verdasdk.CreateInstanceRequest{
-		InstanceType: testInstanceType,
-		Image:        testImage,
-		LocationCode: testLocation,
-		Tags:         cloud.MachineTags("default/test-cluster", "default/test-machine", role),
-	})
-	if err != nil {
-		t.Fatalf("CreateInstance: %v", err)
-	}
-	if ip != "" {
-		if err := cloudClient.SetInstanceIP(inst.ID, ip); err != nil {
-			t.Fatalf("SetInstanceIP: %v", err)
-		}
-	}
-	return inst
-}
-
 func getCluster(t *testing.T, ctx context.Context, r *VerdaClusterReconciler) *infrastructurev1alpha1.VerdaCluster {
 	t.Helper()
 	cluster := &infrastructurev1alpha1.VerdaCluster{}
@@ -88,10 +67,33 @@ func getCluster(t *testing.T, ctx context.Context, r *VerdaClusterReconciler) *i
 	return cluster
 }
 
-func TestClusterReconcilePublishesEndpoint(t *testing.T) {
+// theProxy returns the cluster's one endpoint-proxy instance from
+// the fake cloud, failing the test unless there is exactly one.
+func theProxy(t *testing.T, ctx context.Context, cloudClient *cloud.FakeClient) (string, string) {
+	t.Helper()
+	found, err := cloudClient.FindInstancesByTags(ctx, map[string]string{
+		cloud.TagClusterName: testNamespace + "/" + testClusterName,
+		cloud.TagRole:        cloud.RoleEndpointProxy,
+	})
+	if err != nil {
+		t.Fatalf("FindInstancesByTags: %v", err)
+	}
+	if len(found) != 1 {
+		t.Fatalf("cloud has %d endpoint proxies, want 1", len(found))
+	}
+	if found[0].IP == nil {
+		t.Fatalf("endpoint proxy %s has no public IP", found[0].ID)
+	}
+	return found[0].ID, *found[0].IP
+}
+
+// One reconcile builds the whole endpoint path — private network,
+// subnet, proxy instance — and publishes the proxy's address as the
+// control-plane endpoint with provisioned set: the state KCP and
+// CABPK are waiting for before any machine can exist.
+func TestClusterReconcileProvisionsNetworkProxyAndEndpoint(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()
-	seedInstance(t, ctx, cloudClient, cloud.RoleControlPlane, "203.0.113.10")
 	r := clusterTestReconciler(t, cloudClient, reconcileTestCluster())
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName, Namespace: testNamespace}}
 
@@ -102,77 +104,135 @@ func TestClusterReconcilePublishesEndpoint(t *testing.T) {
 	if result.RequeueAfter != 0 {
 		t.Errorf("RequeueAfter = %v, want 0 once the endpoint is published", result.RequeueAfter)
 	}
+
+	networks, err := cloudClient.ListPrivateNetworks(ctx)
+	if err != nil {
+		t.Fatalf("ListPrivateNetworks: %v", err)
+	}
+	if len(networks) != 1 || networks[0].Name != "capve-default-test-cluster" {
+		t.Fatalf("networks = %+v, want one capve-default-test-cluster", networks)
+	}
+	subnets, err := cloudClient.ListSubnets(ctx, networks[0].ID)
+	if err != nil {
+		t.Fatalf("ListSubnets: %v", err)
+	}
+	if len(subnets) != 1 || subnets[0].CIDR != cloud.SubnetCIDR || subnets[0].Location.Code != testLocation {
+		t.Fatalf("subnets = %+v, want one %s subnet in %s", subnets, cloud.SubnetCIDR, testLocation)
+	}
+
+	proxyID, proxyIP := theProxy(t, ctx, cloudClient)
+	createReq, ok := cloudClient.CreateRequestFor(proxyID)
+	if !ok {
+		t.Fatalf("no create request recorded for proxy %s", proxyID)
+	}
+	if createReq.Network != networks[0].ID || createReq.Subnet != subnets[0].ID {
+		t.Errorf("proxy created on network %q subnet %q, want %q/%q", createReq.Network, createReq.Subnet, networks[0].ID, subnets[0].ID)
+	}
+	if createReq.PrivateIP == nil || string(*createReq.PrivateIP) != cloud.ProxyPrivateIP {
+		t.Errorf("proxy private allocation = %v, want %s", createReq.PrivateIP, cloud.ProxyPrivateIP)
+	}
+	script := cloudClient.StartupScriptFor(proxyID)
+	if !strings.Contains(script, "server control-plane "+cloud.ControlPlanePrivateIP+":6443") {
+		t.Errorf("proxy startup script does not forward to the control plane:\n%s", script)
+	}
+
 	cluster := getCluster(t, ctx, r)
-	if cluster.Spec.ControlPlaneEndpoint.Host != "203.0.113.10" || cluster.Spec.ControlPlaneEndpoint.Port != controlPlanePort {
-		t.Errorf("endpoint = %+v, want 203.0.113.10:%d", cluster.Spec.ControlPlaneEndpoint, controlPlanePort)
+	if cluster.Status.NetworkID != networks[0].ID || cluster.Status.SubnetID != subnets[0].ID {
+		t.Errorf("status network/subnet = %q/%q, want %q/%q", cluster.Status.NetworkID, cluster.Status.SubnetID, networks[0].ID, subnets[0].ID)
+	}
+	if cluster.Spec.ControlPlaneEndpoint.Host != proxyIP || cluster.Spec.ControlPlaneEndpoint.Port != controlPlanePort {
+		t.Errorf("endpoint = %+v, want %s:%d", cluster.Spec.ControlPlaneEndpoint, proxyIP, controlPlanePort)
 	}
 	if cluster.Status.Initialization.Provisioned == nil || !*cluster.Status.Initialization.Provisioned {
 		t.Error("status.initialization.provisioned is not true (the v1beta2 contract signal)")
 	}
-
-	// A second pass is a no-op: same endpoint, still provisioned.
-	if _, err := r.Reconcile(ctx, req); err != nil {
-		t.Fatalf("Reconcile (second pass): %v", err)
+	hasFinalizer := false
+	for _, f := range cluster.Finalizers {
+		if f == verdaClusterFinalizer {
+			hasFinalizer = true
+		}
 	}
-	cluster = getCluster(t, ctx, r)
-	if cluster.Spec.ControlPlaneEndpoint.Host != "203.0.113.10" {
-		t.Errorf("endpoint after second pass = %+v, want unchanged", cluster.Spec.ControlPlaneEndpoint)
+	if !hasFinalizer {
+		t.Error("finalizer was not added")
 	}
 }
 
-func TestClusterReconcileWaitsForControlPlane(t *testing.T) {
+// A second reconcile must not duplicate the network, subnet, or
+// proxy: find-or-create by name and tag is the idempotency story
+// (the API has no idempotency keys).
+func TestClusterReconcileIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()
 	r := clusterTestReconciler(t, cloudClient, reconcileTestCluster())
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName, Namespace: testNamespace}}
 
-	result, err := r.Reconcile(ctx, req)
+	for i := range 2 {
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Fatalf("Reconcile %d: %v", i, err)
+		}
+	}
+	networks, err := cloudClient.ListPrivateNetworks(ctx)
 	if err != nil {
-		t.Fatalf("Reconcile: %v", err)
+		t.Fatalf("ListPrivateNetworks: %v", err)
 	}
-	if result.RequeueAfter != 15*time.Second {
-		t.Errorf("RequeueAfter = %v, want 15s while no control-plane instance exists", result.RequeueAfter)
+	if len(networks) != 1 {
+		t.Fatalf("networks = %d after two reconciles, want 1", len(networks))
 	}
-	cluster := getCluster(t, ctx, r)
-	if !cluster.Spec.ControlPlaneEndpoint.IsZero() {
-		t.Errorf("endpoint = %+v, want zero with no instances", cluster.Spec.ControlPlaneEndpoint)
+	subnets, err := cloudClient.ListSubnets(ctx, networks[0].ID)
+	if err != nil {
+		t.Fatalf("ListSubnets: %v", err)
 	}
-	if cluster.Status.Initialization.Provisioned != nil && *cluster.Status.Initialization.Provisioned {
-		t.Error("provisioned is true with no control-plane instance")
+	if len(subnets) != 1 {
+		t.Errorf("subnets = %d after two reconciles, want 1", len(subnets))
 	}
+	theProxy(t, ctx, cloudClient)
 }
 
-func TestClusterReconcileIgnoresWorkers(t *testing.T) {
+// Deleting the cluster removes the proxy, the subnet, and the
+// network, and releases the finalizer.
+func TestClusterReconcileDeleteRemovesNetworkAndProxy(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()
-	seedInstance(t, ctx, cloudClient, cloud.RoleWorker, "203.0.113.20")
 	r := clusterTestReconciler(t, cloudClient, reconcileTestCluster())
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName, Namespace: testNamespace}}
 
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
+	theProxy(t, ctx, cloudClient)
+
 	cluster := getCluster(t, ctx, r)
-	if !cluster.Spec.ControlPlaneEndpoint.IsZero() {
-		t.Errorf("endpoint = %+v, want zero when only a worker exists", cluster.Spec.ControlPlaneEndpoint)
+	if err := r.Delete(ctx, cluster); err != nil {
+		t.Fatalf("Delete: %v", err)
 	}
-}
-
-func TestClusterReconcileWaitsForRunningInstance(t *testing.T) {
-	ctx := context.Background()
-	cloudClient := cloud.NewFakeClient()
-	inst := seedInstance(t, ctx, cloudClient, cloud.RoleControlPlane, "203.0.113.10")
-	if err := cloudClient.SetInstanceStatus(inst.ID, "provisioning"); err != nil {
-		t.Fatalf("SetInstanceStatus: %v", err)
-	}
-	r := clusterTestReconciler(t, cloudClient, reconcileTestCluster())
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName, Namespace: testNamespace}}
-
 	if _, err := r.Reconcile(ctx, req); err != nil {
-		t.Fatalf("Reconcile: %v", err)
+		t.Fatalf("Reconcile (delete): %v", err)
 	}
-	cluster := getCluster(t, ctx, r)
-	if !cluster.Spec.ControlPlaneEndpoint.IsZero() {
-		t.Errorf("endpoint = %+v, want zero while the control-plane instance is not running", cluster.Spec.ControlPlaneEndpoint)
+
+	instances, err := cloudClient.ListInstances(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListInstances: %v", err)
+	}
+	if len(instances) != 0 {
+		t.Errorf("cloud has %d instances after delete, want 0", len(instances))
+	}
+	networks, err := cloudClient.ListPrivateNetworks(ctx)
+	if err != nil {
+		t.Fatalf("ListPrivateNetworks: %v", err)
+	}
+	if len(networks) != 0 {
+		t.Errorf("cloud has %d networks after delete, want 0", len(networks))
+	}
+	// With the finalizer released, the object itself is gone.
+	cluster = &infrastructurev1alpha1.VerdaCluster{}
+	err = r.Get(ctx, types.NamespacedName{Name: testClusterName, Namespace: testNamespace}, cluster)
+	if err == nil {
+		for _, f := range cluster.Finalizers {
+			if f == verdaClusterFinalizer {
+				t.Error("finalizer was not removed")
+			}
+		}
+	} else if !apierrors.IsNotFound(err) {
+		t.Fatalf("Get after delete: %v", err)
 	}
 }

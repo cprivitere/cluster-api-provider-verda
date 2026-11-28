@@ -42,8 +42,8 @@ spec:
               controlPlaneEndpoint:
                 description: |-
                   controlPlaneEndpoint is the API server endpoint of the
-                  workload cluster. The VerdaCluster controller writes it (the
-                  first control-plane instance's public IP, port 6443); core
+                  workload cluster. The VerdaCluster controller writes it:
+                  the endpoint proxy instance's public IP, port 6443. Core
                   copies it onto the Cluster once initialization.provisioned
                   is set, and KCP/CABPK consume it from there.
                 minProperties: 1
@@ -153,6 +153,17 @@ spec:
                       provisioned.
                     type: boolean
                 type: object
+              networkID:
+                description: |-
+                  networkID is the Verda private network the controller created
+                  for this cluster, and subnetID its node subnet in the
+                  cluster's location. The machine controller reads them to
+                  attach instances to the network; both stay empty until the
+                  network exists.
+                type: string
+              subnetID:
+                description: subnetID is the node subnet's ID; see networkID.
+                type: string
             type: object
         required:
         - spec

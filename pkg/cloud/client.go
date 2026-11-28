@@ -68,4 +68,20 @@ type Client interface {
 	GetStartupScript(ctx context.Context, id string) (*verda.StartupScript, error)
 	// DeleteStartupScript deletes one startup script.
 	DeleteStartupScript(ctx context.Context, id string) error
+
+	// ListPrivateNetworks returns every private network in the
+	// project. Networks are global; their subnets are per-location.
+	ListPrivateNetworks(ctx context.Context) ([]verda.PrivateNetwork, error)
+	// CreatePrivateNetwork creates one private network.
+	CreatePrivateNetwork(ctx context.Context, req verda.CreatePrivateNetworkRequest) (*verda.PrivateNetwork, error)
+	// DeletePrivateNetwork deletes one private network by ID, or an
+	// error wrapping ErrNotFound.
+	DeletePrivateNetwork(ctx context.Context, id string) error
+	// ListSubnets returns the subnets of one private network.
+	ListSubnets(ctx context.Context, networkID string) ([]verda.Subnet, error)
+	// CreateSubnet creates one subnet in a private network.
+	CreateSubnet(ctx context.Context, networkID string, req verda.CreateSubnetRequest) (*verda.Subnet, error)
+	// DeleteSubnet deletes one subnet from a private network, or an
+	// error wrapping ErrNotFound.
+	DeleteSubnet(ctx context.Context, networkID, subnetID string) error
 }
