@@ -56,6 +56,22 @@ type VerdaMachineSpec struct {
 	// status instead of silently recreating the machine.
 	// +optional
 	IsSpot bool `json:"isSpot,omitempty"`
+
+	// networkID and subnetID explicitly attach a worker instance to
+	// a private network and one of its subnets. They must be set
+	// together or not at all. Workers are created unattached unless
+	// these are set — an unattached worker reaches the API server
+	// through the cluster's public endpoint. Control-plane machines
+	// ignore these fields: they always join their cluster's network,
+	// because the endpoint proxy forwards to the control plane's
+	// pinned private address.
+	// +optional
+	NetworkID string `json:"networkID,omitempty"`
+
+	// subnetID is the subnet within networkID to take the worker's
+	// private address from. See networkID.
+	// +optional
+	SubnetID string `json:"subnetID,omitempty"`
 }
 
 // Condition types and reasons the VerdaMachine reconciler

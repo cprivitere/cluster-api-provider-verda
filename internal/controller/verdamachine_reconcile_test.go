@@ -311,8 +311,11 @@ func TestReconcileControlPlanePinsPrivateAddress(t *testing.T) {
 	}
 }
 
-// A worker joins the same network with automatic addresses.
-func TestReconcileWorkerJoinsNetworkWithAutoAddress(t *testing.T) {
+// A worker that names no network in its spec stays off every
+// network — even when its cluster has one. It reaches the API
+// server through the cluster's public endpoint instead (the
+// attachment rule: only control planes join by force).
+func TestReconcileWorkerStaysOffNetworkByDefault(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()
 	machine := reconcileTestMachine()
@@ -324,17 +327,65 @@ func TestReconcileWorkerJoinsNetworkWithAutoAddress(t *testing.T) {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	createReq := theInstance(t, ctx, cloudClient)
+	if createReq.Network != "" || createReq.Subnet != "" {
+		t.Errorf("worker created on network %q subnet %q, want unattached", createReq.Network, createReq.Subnet)
+	}
+	if createReq.PrivateIP != nil || createReq.PublicIP != nil {
+		t.Errorf("worker IP allocations = %v/%v, want both unset (platform default)", createReq.PrivateIP, createReq.PublicIP)
+	}
+}
+
+// A worker whose spec explicitly names a network and subnet joins
+// that network with automatic addresses.
+func TestReconcileWorkerJoinsExplicitNetworkFromSpec(t *testing.T) {
+	ctx := context.Background()
+	cloudClient := cloud.NewFakeClient()
+	machine := reconcileTestMachine()
+	machine.Labels = map[string]string{clusterNameLabel: testClusterName}
+	machine.Spec.NetworkID = testNetworkID
+	machine.Spec.SubnetID = testSubnetID
+	r := networkTestReconciler(t, cloudClient, networkTestObjects(machine, true)...)
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testMachineName, Namespace: testNamespace}}
+
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	createReq := theInstance(t, ctx, cloudClient)
 	if createReq.Network != testNetworkID || createReq.Subnet != testSubnetID {
-		t.Errorf("instance created on network %q subnet %q, want network-0001/subnet-0001", createReq.Network, createReq.Subnet)
+		t.Errorf("instance created on network %q subnet %q, want the spec's %q/%q",
+			createReq.Network, createReq.Subnet, testNetworkID, testSubnetID)
 	}
 	if createReq.PrivateIP == nil || *createReq.PrivateIP != verdasdk.IPAllocAuto {
 		t.Errorf("worker private allocation = %v, want auto", createReq.PrivateIP)
 	}
 }
 
-// While the cluster network is not provisioned yet, the machine
-// must not be created off-network: the reconcile errors and no
-// instance appears.
+// A worker spec naming only one of network/subnet is an error, not
+// a half-attached create.
+func TestReconcileWorkerRejectsHalfNamedNetwork(t *testing.T) {
+	ctx := context.Background()
+	cloudClient := cloud.NewFakeClient()
+	machine := reconcileTestMachine()
+	machine.Labels = map[string]string{clusterNameLabel: testClusterName}
+	machine.Spec.NetworkID = testNetworkID
+	r := networkTestReconciler(t, cloudClient, networkTestObjects(machine, true)...)
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testMachineName, Namespace: testNamespace}}
+
+	if _, err := r.Reconcile(ctx, req); err == nil {
+		t.Fatal("Reconcile succeeded with only spec.networkID set, want an error")
+	}
+	instances, err := cloudClient.ListInstances(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListInstances: %v", err)
+	}
+	if len(instances) != 0 {
+		t.Errorf("cloud has %d instances, want 0 after the rejected spec", len(instances))
+	}
+}
+
+// While the cluster network is not provisioned yet, a control
+// plane must not be created off-network (its attachment is
+// enforced): the reconcile errors and no instance appears.
 func TestReconcileWaitsForClusterNetwork(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()

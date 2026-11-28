@@ -266,15 +266,16 @@ func (r *VerdaMachineReconciler) findOrCreateInstance(ctx context.Context, machi
 		Tags:          cloud.MachineTags(clusterNameFor(machine), machine.Namespace+"/"+machine.Name, roleFor(machine)),
 	}
 
-	// Instances of a cluster join its private network (the cluster
-	// controller creates the network and records it in the
-	// VerdaCluster status). The control plane takes the pinned
-	// private address the endpoint proxy forwards to; every other
-	// node takes an automatic address. The API requires the private
-	// and public allocations to be set together, so the public side
-	// asks for automatic alongside. A standalone machine has no
-	// cluster network and keeps the platform default placement.
-	networkID, subnetID, err := r.clusterAttachment(ctx, machine)
+	// Private-network placement follows the attachment rule (see
+	// networkAttachment): control planes always join their cluster's
+	// network at the pinned private address the endpoint proxy
+	// forwards to; workers join only a network their own spec names,
+	// with an automatic address. The API requires the private and
+	// public allocations to be set together, so the public side asks
+	// for automatic alongside. An unattached machine keeps the
+	// platform default placement and reaches the API server through
+	// the cluster's public endpoint.
+	networkID, subnetID, err := r.networkAttachment(ctx, machine)
 	if err != nil {
 		return nil, err
 	}
@@ -556,15 +557,38 @@ func clusterNameFor(machine *infrastructurev1alpha1.VerdaMachine) string {
 	return machine.Namespace + "/" + machine.Name
 }
 
-// clusterAttachment returns the private network and subnet IDs the
-// machine's instance attaches to, recorded in the VerdaCluster
-// status by the cluster controller. A standalone machine (no
-// cluster-name label, no Cluster, or no infrastructure reference)
-// gets empty strings and the platform default placement. A cluster
-// whose network is not recorded yet is an error rather than an
-// off-network create the instance would be stranded on, so the
-// reconcile retries until the cluster controller has provisioned
-// the network.
+// networkAttachment decides the private-network placement of a
+// machine's instance, per the attachment rule (Chris's design, Nov
+// 27, 2026): control planes MUST join their cluster's network — the
+// endpoint proxy forwards to the control plane's pinned private
+// address, so a control plane off that network is a broken cluster.
+// Workers join a network only when their own spec explicitly names
+// one (spec.networkID/spec.subnetID); a worker that names none is
+// created unattached and reaches the API server through the
+// cluster's public endpoint — the flexible-join path, e.g. a GPU
+// worker in another location, whose subnet cannot be the cluster's.
+// (Production posture is the reverse default for workers — attach
+// everything and keep traffic private; the public join exists for
+// placement flexibility in this demo.)
+func (r *VerdaMachineReconciler) networkAttachment(ctx context.Context, machine *infrastructurev1alpha1.VerdaMachine) (string, string, error) {
+	if roleFor(machine) == cloud.RoleControlPlane {
+		return r.clusterAttachment(ctx, machine)
+	}
+	if (machine.Spec.NetworkID == "") != (machine.Spec.SubnetID == "") {
+		return "", "", fmt.Errorf("spec.networkID and spec.subnetID must be set together")
+	}
+	return machine.Spec.NetworkID, machine.Spec.SubnetID, nil
+}
+
+// clusterAttachment returns the private network and subnet IDs of
+// the machine's cluster, recorded in the VerdaCluster status by the
+// cluster controller. It is the control-plane path of
+// networkAttachment. A standalone machine (no cluster-name label,
+// no Cluster, or no infrastructure reference) gets empty strings
+// and the platform default placement. A cluster whose network is
+// not recorded yet is an error rather than an off-network create
+// the instance would be stranded on, so the reconcile retries until
+// the cluster controller has provisioned the network.
 func (r *VerdaMachineReconciler) clusterAttachment(ctx context.Context, machine *infrastructurev1alpha1.VerdaMachine) (string, string, error) {
 	clusterName := machine.Labels[clusterNameLabel]
 	if clusterName == "" {
