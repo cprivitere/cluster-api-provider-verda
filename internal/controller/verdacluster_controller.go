@@ -25,9 +25,7 @@ import (
 	verdasdk "github.com/verda-cloud/verdacloud-sdk-go/pkg/verda"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
-	controlplanev1beta2 "sigs.k8s.io/cluster-api/api/controlplane/kubeadm/v1beta2"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -116,9 +114,6 @@ type VerdaClusterReconciler struct {
 // +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=verdaclusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=verdaclusters/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=verdaclusters/finalizers,verbs=update
-// +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=verdamachinetemplates,verbs=get;list;watch
-// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters,verbs=get;list;watch
-// +kubebuilder:rbac:groups=controlplane.cluster.x-k8s.io,resources=kubeadmcontrolplanes,verbs=get;list;watch
 
 func (r *VerdaClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -327,12 +322,21 @@ func (r *VerdaClusterReconciler) ensureProxy(ctx context.Context, cluster *infra
 		return nil, fmt.Errorf("proxy private address: %w", err)
 	}
 	public := verdasdk.IPAllocAuto
+	// No SSH keys on the proxy: the live API rejected the create
+	// with a 400 claiming the (verified-valid) key UUID array was
+	// malformed, on the first network-attached create this provider
+	// ever made (Nov 27, 2026). The proxy only forwards TCP and
+	// needs no login to do its job, so it goes without keys while
+	// the control-plane machine's create — same keys, same network
+	// shape — shows whether the rejection is proxy-specific or
+	// applies to every network-attached create with keys.
+	log.Info("Creating endpoint proxy", "instanceType", proxyInstanceType,
+		"networkID", networkID, "subnetID", subnetID, "privateIP", cloud.ProxyPrivateIP)
 	inst, err := r.Cloud.CreateInstance(ctx, verdasdk.CreateInstanceRequest{
 		InstanceType:  proxyInstanceType,
 		Image:         proxyImage,
 		LocationCode:  cluster.Spec.Location,
 		Hostname:      cluster.Name + "-proxy",
-		SSHKeyIDs:     r.controlPlaneSSHKeyIDs(ctx, cluster),
 		Network:       networkID,
 		Subnet:        subnetID,
 		PrivateIP:     &private,
@@ -345,39 +349,6 @@ func (r *VerdaClusterReconciler) ensureProxy(ctx context.Context, cluster *infra
 	}
 	log.Info("Created endpoint proxy", "instanceID", inst.ID)
 	return inst, nil
-}
-
-// controlPlaneSSHKeyIDs returns the SSH keys of the cluster's
-// control-plane machine template, so the proxy — the one instance
-// an operator may need to log into when the API is unreachable —
-// accepts the same keys as the control plane it fronts. The lookup
-// is best-effort: any missing link yields no keys rather than
-// blocking the endpoint.
-func (r *VerdaClusterReconciler) controlPlaneSSHKeyIDs(ctx context.Context, cluster *infrastructurev1alpha1.VerdaCluster) []string {
-	clusterName := cluster.Labels[clusterNameLabel]
-	if clusterName == "" {
-		clusterName = cluster.Name
-	}
-	owner := &clusterv1.Cluster{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: clusterName}, owner); err != nil {
-		return nil
-	}
-	if owner.Spec.ControlPlaneRef.Name == "" {
-		return nil
-	}
-	controlPlane := &controlplanev1beta2.KubeadmControlPlane{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: owner.Spec.ControlPlaneRef.Name}, controlPlane); err != nil {
-		return nil
-	}
-	templateName := controlPlane.Spec.MachineTemplate.Spec.InfrastructureRef.Name
-	if templateName == "" {
-		return nil
-	}
-	template := &infrastructurev1alpha1.VerdaMachineTemplate{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: templateName}, template); err != nil {
-		return nil
-	}
-	return template.Spec.Template.Spec.SSHKeyIDs
 }
 
 // networkNameFor is the cluster's private network name. Networks
