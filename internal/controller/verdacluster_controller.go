@@ -25,7 +25,9 @@ import (
 	verdasdk "github.com/verda-cloud/verdacloud-sdk-go/pkg/verda"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	controlplanev1beta2 "sigs.k8s.io/cluster-api/api/controlplane/kubeadm/v1beta2"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -114,6 +116,9 @@ type VerdaClusterReconciler struct {
 // +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=verdaclusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=verdaclusters/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=verdaclusters/finalizers,verbs=update
+// +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=verdamachinetemplates,verbs=get;list;watch
+// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters,verbs=get;list;watch
+// +kubebuilder:rbac:groups=controlplane.cluster.x-k8s.io,resources=kubeadmcontrolplanes,verbs=get;list;watch
 
 func (r *VerdaClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -321,22 +326,21 @@ func (r *VerdaClusterReconciler) ensureProxy(ctx context.Context, cluster *infra
 	if err != nil {
 		return nil, fmt.Errorf("proxy private address: %w", err)
 	}
+	sshKeyIDs, err := r.controlPlaneSSHKeyIDs(ctx, cluster)
+	if err != nil {
+		return nil, err
+	}
+
 	public := verdasdk.IPAllocAuto
-	// No SSH keys on the proxy: the live API rejected the create
-	// with a 400 claiming the (verified-valid) key UUID array was
-	// malformed, on the first network-attached create this provider
-	// ever made (Nov 27, 2026). The proxy only forwards TCP and
-	// needs no login to do its job, so it goes without keys while
-	// the control-plane machine's create — same keys, same network
-	// shape — shows whether the rejection is proxy-specific or
-	// applies to every network-attached create with keys.
 	log.Info("Creating endpoint proxy", "instanceType", proxyInstanceType,
-		"networkID", networkID, "subnetID", subnetID, "privateIP", cloud.ProxyPrivateIP)
+		"networkID", networkID, "subnetID", subnetID, "privateIP", cloud.ProxyPrivateIP,
+		"sshKeyCount", len(sshKeyIDs))
 	inst, err := r.Cloud.CreateInstance(ctx, verdasdk.CreateInstanceRequest{
 		InstanceType:  proxyInstanceType,
 		Image:         proxyImage,
 		LocationCode:  cluster.Spec.Location,
 		Hostname:      cluster.Name + "-proxy",
+		SSHKeyIDs:     sshKeyIDs,
 		Network:       networkID,
 		Subnet:        subnetID,
 		PrivateIP:     &private,
@@ -349,6 +353,52 @@ func (r *VerdaClusterReconciler) ensureProxy(ctx context.Context, cluster *infra
 	}
 	log.Info("Created endpoint proxy", "instanceID", inst.ID)
 	return inst, nil
+}
+
+// controlPlaneSSHKeyIDs returns the SSH keys of the cluster's
+// control-plane machine template, so the proxy — the one instance
+// an operator may need to log into when the API is unreachable —
+// accepts the same keys as the control plane it fronts.
+//
+// The lookup is deliberately loud, not best-effort: the Verda API
+// rejects instance creates that carry no ssh_key_ids (a 400 whose
+// message claims the field may be omitted), so a silent nil here
+// once sent the proxy create to the API keyless and produced a
+// baffling "malformed SSH keys" error (Nov 27, 2026 — compounded
+// by cmd/main.go not registering the KubeadmControlPlane scheme,
+// which made every read fail). Any missing link is an error and
+// the reconcile retries until the chain exists.
+func (r *VerdaClusterReconciler) controlPlaneSSHKeyIDs(ctx context.Context, cluster *infrastructurev1alpha1.VerdaCluster) ([]string, error) {
+	clusterName := cluster.Labels[clusterNameLabel]
+	if clusterName == "" {
+		clusterName = cluster.Name
+	}
+	owner := &clusterv1.Cluster{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: clusterName}, owner); err != nil {
+		return nil, fmt.Errorf("reading owner Cluster for SSH keys: %w", err)
+	}
+	if owner.Spec.ControlPlaneRef.Name == "" {
+		return nil, fmt.Errorf("owner Cluster %s has no control plane ref yet", clusterName)
+	}
+	controlPlane := &controlplanev1beta2.KubeadmControlPlane{}
+	key := types.NamespacedName{Namespace: cluster.Namespace, Name: owner.Spec.ControlPlaneRef.Name}
+	if err := r.Get(ctx, key, controlPlane); err != nil {
+		return nil, fmt.Errorf("reading control plane for SSH keys: %w", err)
+	}
+	templateName := controlPlane.Spec.MachineTemplate.Spec.InfrastructureRef.Name
+	if templateName == "" {
+		return nil, fmt.Errorf("control plane %s has no machine template yet", owner.Spec.ControlPlaneRef.Name)
+	}
+	template := &infrastructurev1alpha1.VerdaMachineTemplate{}
+	key = types.NamespacedName{Namespace: cluster.Namespace, Name: templateName}
+	if err := r.Get(ctx, key, template); err != nil {
+		return nil, fmt.Errorf("reading control-plane machine template for SSH keys: %w", err)
+	}
+	sshKeyIDs := template.Spec.Template.Spec.SSHKeyIDs
+	if len(sshKeyIDs) == 0 {
+		return nil, fmt.Errorf("control-plane machine template %s carries no SSH keys", templateName)
+	}
+	return sshKeyIDs, nil
 }
 
 // networkNameFor is the cluster's private network name. Networks

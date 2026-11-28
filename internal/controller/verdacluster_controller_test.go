@@ -82,7 +82,7 @@ var _ = Describe("VerdaCluster Controller", func() {
 			By("Cleanup the specific resource instance VerdaCluster")
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 		})
-		It("should successfully reconcile the resource", func() {
+		It("should fail loudly when the control-plane chain is absent", func() {
 			By("Reconciling the created resource")
 			controllerReconciler := &VerdaClusterReconciler{
 				Client: k8sClient,
@@ -90,12 +90,21 @@ var _ = Describe("VerdaCluster Controller", func() {
 				Cloud:  cloud.NewFakeClient(),
 			}
 
+			// This lone VerdaCluster has no owner Cluster /
+			// KubeadmControlPlane / machine template, so the endpoint
+			// proxy's SSH keys cannot be resolved — and the API
+			// rejects keyless instance creates. The reconcile must
+			// error rather than create a keyless proxy (the Nov 27,
+			// 2026 live failure mode). The happy path, with the full
+			// chain seeded, is covered by the plain-Go tests in
+			// verdacluster_reconcile_test.go; envtest here installs
+			// only this provider's CRDs, so the chain's CRDs are not
+			// available to seed.
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			})
-			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("SSH keys"))
 		})
 	})
 })

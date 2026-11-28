@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	controlplanev1beta2 "sigs.k8s.io/cluster-api/api/controlplane/kubeadm/v1beta2"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/cluster-api/controllers/clustercache"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -54,6 +55,12 @@ func init() {
 
 	utilruntime.Must(infrastructurev1alpha1.AddToScheme(scheme))
 	utilruntime.Must(clusterv1.AddToScheme(scheme))
+	// The cluster controller reads KubeadmControlPlane objects (the
+	// control-plane template's SSH keys for the endpoint proxy).
+	// Without this registration those reads fail with a missing-kind
+	// error — which a best-effort lookup once swallowed, sending the
+	// proxy create to the API with no keys at all (Nov 27, 2026).
+	utilruntime.Must(controlplanev1beta2.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 

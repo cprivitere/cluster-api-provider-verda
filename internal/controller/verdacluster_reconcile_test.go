@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -25,6 +26,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	controlplanev1beta2 "sigs.k8s.io/cluster-api/api/controlplane/kubeadm/v1beta2"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -32,6 +35,64 @@ import (
 	infrastructurev1alpha1 "github.com/cprivitere/cluster-api-provider-verda/api/v1alpha1"
 	"github.com/cprivitere/cluster-api-provider-verda/pkg/cloud"
 )
+
+const (
+	testControlPlaneName = "test-control-plane"
+	testCPTemplateName   = "test-cp-template"
+)
+
+// testSSHKeyIDs stands in for the project's real key IDs (UUID-shaped,
+// as the API requires).
+var testSSHKeyIDs = []string{
+	"11111111-2222-4333-8444-555555555555",
+	"66666666-7777-4888-8999-000000000000",
+}
+
+// reconcileTestControlPlaneChain returns the objects the cluster
+// controller's SSH-key lookup walks: the owner Cluster, its
+// KubeadmControlPlane, and the control-plane machine template
+// carrying the keys.
+func reconcileTestControlPlaneChain() []client.Object {
+	owner := &clusterv1.Cluster{
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: testNamespace},
+		Spec: clusterv1.ClusterSpec{
+			ControlPlaneRef: clusterv1.ContractVersionedObjectReference{
+				APIGroup: "controlplane.cluster.x-k8s.io",
+				Kind:     "KubeadmControlPlane",
+				Name:     testControlPlaneName,
+			},
+		},
+	}
+	controlPlane := &controlplanev1beta2.KubeadmControlPlane{
+		ObjectMeta: metav1.ObjectMeta{Name: testControlPlaneName, Namespace: testNamespace},
+		Spec: controlplanev1beta2.KubeadmControlPlaneSpec{
+			MachineTemplate: controlplanev1beta2.KubeadmControlPlaneMachineTemplate{
+				Spec: controlplanev1beta2.KubeadmControlPlaneMachineTemplateSpec{
+					InfrastructureRef: clusterv1.ContractVersionedObjectReference{
+						APIGroup: "infrastructure.cluster.x-k8s.io",
+						Kind:     "VerdaMachineTemplate",
+						Name:     testCPTemplateName,
+					},
+				},
+			},
+		},
+	}
+	template := &infrastructurev1alpha1.VerdaMachineTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: testCPTemplateName, Namespace: testNamespace},
+		Spec: infrastructurev1alpha1.VerdaMachineTemplateSpec{
+			Template: infrastructurev1alpha1.VerdaMachineTemplateResource{
+				Spec: infrastructurev1alpha1.VerdaMachineSpec{SSHKeyIDs: testSSHKeyIDs},
+			},
+		},
+	}
+	return []client.Object{owner, controlPlane, template}
+}
+
+// clusterWithChain returns the reconciler inputs for a cluster whose
+// control-plane chain exists: the VerdaCluster plus the lookup chain.
+func clusterWithChain() []client.Object {
+	return append([]client.Object{reconcileTestCluster()}, reconcileTestControlPlaneChain()...)
+}
 
 func reconcileTestCluster() *infrastructurev1alpha1.VerdaCluster {
 	return &infrastructurev1alpha1.VerdaCluster{
@@ -49,6 +110,12 @@ func clusterTestReconciler(t *testing.T, cloudClient cloud.Client, objs ...clien
 	scheme := runtime.NewScheme()
 	if err := infrastructurev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
+	}
+	if err := clusterv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme (core): %v", err)
+	}
+	if err := controlplanev1beta2.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme (controlplane): %v", err)
 	}
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -94,7 +161,7 @@ func theProxy(t *testing.T, ctx context.Context, cloudClient *cloud.FakeClient) 
 func TestClusterReconcileProvisionsNetworkProxyAndEndpoint(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()
-	r := clusterTestReconciler(t, cloudClient, reconcileTestCluster())
+	r := clusterTestReconciler(t, cloudClient, clusterWithChain()...)
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName, Namespace: testNamespace}}
 
 	result, err := r.Reconcile(ctx, req)
@@ -131,6 +198,9 @@ func TestClusterReconcileProvisionsNetworkProxyAndEndpoint(t *testing.T) {
 	if createReq.PrivateIP == nil || string(*createReq.PrivateIP) != cloud.ProxyPrivateIP {
 		t.Errorf("proxy private allocation = %v, want %s", createReq.PrivateIP, cloud.ProxyPrivateIP)
 	}
+	if !slices.Equal(createReq.SSHKeyIDs, testSSHKeyIDs) {
+		t.Errorf("proxy SSH keys = %v, want the control-plane template's %v", createReq.SSHKeyIDs, testSSHKeyIDs)
+	}
 	script := cloudClient.StartupScriptFor(proxyID)
 	if !strings.Contains(script, "server control-plane "+cloud.ControlPlanePrivateIP+":6443") {
 		t.Errorf("proxy startup script does not forward to the control plane:\n%s", script)
@@ -157,13 +227,36 @@ func TestClusterReconcileProvisionsNetworkProxyAndEndpoint(t *testing.T) {
 	}
 }
 
+// Without the control-plane chain, the proxy's SSH keys cannot be
+// resolved — and the reconcile must fail loudly rather than create
+// a keyless instance the API rejects (the Nov 27, 2026 live
+// failure: a best-effort lookup swallowed a missing-scheme error
+// and the create went out with no keys at all).
+func TestClusterReconcileFailsLoudlyWithoutControlPlaneChain(t *testing.T) {
+	ctx := context.Background()
+	cloudClient := cloud.NewFakeClient()
+	r := clusterTestReconciler(t, cloudClient, reconcileTestCluster())
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName, Namespace: testNamespace}}
+
+	if _, err := r.Reconcile(ctx, req); err == nil {
+		t.Fatal("Reconcile succeeded without a control-plane chain, want an error")
+	}
+	instances, err := cloudClient.ListInstances(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListInstances: %v", err)
+	}
+	if len(instances) != 0 {
+		t.Errorf("cloud has %d instances after the failed reconcile, want 0", len(instances))
+	}
+}
+
 // A second reconcile must not duplicate the network, subnet, or
 // proxy: find-or-create by name and tag is the idempotency story
 // (the API has no idempotency keys).
 func TestClusterReconcileIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()
-	r := clusterTestReconciler(t, cloudClient, reconcileTestCluster())
+	r := clusterTestReconciler(t, cloudClient, clusterWithChain()...)
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName, Namespace: testNamespace}}
 
 	for i := range 2 {
@@ -193,7 +286,7 @@ func TestClusterReconcileIsIdempotent(t *testing.T) {
 func TestClusterReconcileDeleteRemovesNetworkAndProxy(t *testing.T) {
 	ctx := context.Background()
 	cloudClient := cloud.NewFakeClient()
-	r := clusterTestReconciler(t, cloudClient, reconcileTestCluster())
+	r := clusterTestReconciler(t, cloudClient, clusterWithChain()...)
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName, Namespace: testNamespace}}
 
 	if _, err := r.Reconcile(ctx, req); err != nil {
