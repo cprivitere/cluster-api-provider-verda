@@ -84,7 +84,15 @@ frontend k8s-api
 backend k8s-control-plane
     server control-plane %s:6443
 HAPROXY_EOF
-systemctl enable --now haproxy
+# Restart rather than enable --now: the package may already have
+# started haproxy with its default configuration (which has no
+# 6443 frontend), and --now does not restart a running service —
+# observed live on Nov 27, 2026, when the proxy answered every
+# endpoint dial with connection refused while running the stock
+# config. A restart guarantees the configuration above is the one
+# being served.
+systemctl enable haproxy
+systemctl restart haproxy
 `
 
 // VerdaClusterReconciler reconciles a VerdaCluster object.
